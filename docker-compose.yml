@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: sharedlists
+      POSTGRES_PASSWORD: sharedlists
+      POSTGRES_DB: sharedlists
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sharedlists']
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+    env_file:
+      - path: ./api/.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://sharedlists:sharedlists@postgres/sharedlists
+      JWT_SECRET: local-docker-secret-at-least-32-characters
+      WEB_URL: http://${HOST:-localhost}:3000
+      PUBLIC_URL: http://${HOST:-localhost}:8080
+      EXTRA_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    ports:
+      - '8080:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Static frontend. HOST=<your LAN IP> in .env makes it reachable from a phone on the same network.
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://${HOST:-localhost}:8080
+    ports:
+      - '3000:80'
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
