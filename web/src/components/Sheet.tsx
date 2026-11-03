@@ -33,7 +33,7 @@ export function Sheet({ open, onOpenChange, title, description, dismissible = tr
 }
 
 export const sheetInput =
-  "h-13 w-full rounded-2xl bg-bg px-4 text-[17px] outline-none placeholder:text-text-2 focus:ring-2 focus:ring-ink";
+  "h-13 w-full rounded-2xl border border-transparent bg-bg px-4 text-[17px] outline-none transition-[border-color,box-shadow] duration-200 ease-out placeholder:text-text-2 focus:border-text/25 focus:ring-4 focus:ring-halo";
 
 export const sheetPrimary =
   "press mt-3 flex h-13 w-full items-center justify-center rounded-2xl bg-ink text-[17px] font-semibold text-on-ink disabled:opacity-40";
