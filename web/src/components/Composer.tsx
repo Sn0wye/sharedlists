@@ -33,7 +33,7 @@ export function Composer({ onAdd }: { onAdd: (text: string) => void }) {
           aria-label="Novo item"
           enterKeyHint="send"
           autoComplete="off"
-          className="h-11 min-w-0 flex-1 rounded-full border border-sep-strong bg-surface px-4 text-[17px] outline-none placeholder:text-text-2 focus:border-text"
+          className="h-11 min-w-0 flex-1 rounded-full border border-sep-strong bg-surface px-4 text-[17px] outline-none transition-[border-color,box-shadow] duration-200 ease-out placeholder:text-text-2 focus:border-text/25 focus:ring-4 focus:ring-halo"
         />
         <AnimatePresence initial={false}>
           {ready && (
