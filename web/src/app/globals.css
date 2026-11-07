@@ -138,7 +138,24 @@ body {
   }
 }
 
+/* Typing: each person's dot breathes, staggered. */
+.typing-dot {
+  animation: typing-breathe 1.2s ease-in-out infinite;
+}
+@keyframes typing-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .typing-dot {
+    animation: none;
+  }
   .press,
   .check-box,
   .strike,

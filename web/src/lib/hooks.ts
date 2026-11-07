@@ -9,6 +9,9 @@ export function useAuth() {
 
 export type Connection = "connecting" | "open" | "offline";
 
+/** Lets another hook (presence) talk over the same socket while it is open. */
+export type RealtimeLink = { onOpen: (send: (msg: object) => void) => void; onClose: () => void };
+
 /**
  * Subscribes to live events for one list, or for the group's screen when `listId` is null.
  * Reconnects with backoff; `onResync` fires after a reconnect so the caller can refetch
@@ -19,11 +22,12 @@ export function useRealtime(
   listId: string | null,
   onEvent: (e: RealtimeEvent) => void,
   onResync: () => void,
+  link?: RealtimeLink,
 ): Connection {
   const [connection, setConnection] = useState<Connection>("connecting");
-  const handlers = useRef({ onEvent, onResync });
+  const handlers = useRef({ onEvent, onResync, link });
   useEffect(() => {
-    handlers.current = { onEvent, onResync };
+    handlers.current = { onEvent, onResync, link };
   });
 
   useEffect(() => {
@@ -36,18 +40,21 @@ export function useRealtime(
     const url = `${API_URL.replace(/^http/, "ws")}/ws?${query}`;
 
     const connect = () => {
-      socket = new WebSocket(url);
-      socket.onopen = () => {
+      const s = new WebSocket(url);
+      socket = s;
+      s.onopen = () => {
         setConnection("open");
+        handlers.current.link?.onOpen((msg) => s.readyState === WebSocket.OPEN && s.send(JSON.stringify(msg)));
         if (attempt > 0) handlers.current.onResync();
         attempt = 0;
       };
-      socket.onmessage = (msg) => {
+      s.onmessage = (msg) => {
         const event = JSON.parse(msg.data) as RealtimeEvent;
         if (event.type === "resync") handlers.current.onResync();
         else handlers.current.onEvent(event);
       };
-      socket.onclose = () => {
+      s.onclose = () => {
+        handlers.current.link?.onClose();
         if (closed) return;
         setConnection("offline");
         attempt++;
@@ -62,6 +69,7 @@ export function useRealtime(
       if (socket) {
         socket.onclose = null;
         socket.close();
+        handlers.current.link?.onClose();
       }
       attempt = Math.max(attempt, 1);
       connect();
