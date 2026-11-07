@@ -141,9 +141,9 @@ export async function setUsername(username: string) {
 // ---------- requests ----------
 
 /** `token` is a list's link token, which every list and item route needs. */
-type RequestOptions = { method?: string; body?: unknown; token?: string };
+type RequestOptions = { method?: string; body?: unknown; token?: string; headers?: Record<string, string> };
 
-export async function api<T>(path: string, { method = "GET", body, token }: RequestOptions = {}): Promise<T> {
+export async function api<T>(path: string, { method = "GET", body, token, headers }: RequestOptions = {}): Promise<T> {
   const send = () =>
     fetch(`${API_URL}${path}`, {
       method,
@@ -151,6 +151,7 @@ export async function api<T>(path: string, { method = "GET", body, token }: Requ
         ...(body !== undefined && { "Content-Type": "application/json" }),
         ...(accessToken && { Authorization: `Bearer ${accessToken}` }),
         ...(token && { "X-List-Token": token }),
+        ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

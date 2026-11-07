@@ -4,6 +4,7 @@ mod error;
 mod lists;
 mod order_key;
 mod presence;
+mod push;
 mod realtime;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub http: reqwest::Client,
     pub jwt: Arc<(EncodingKey, DecodingKey)>,
+    /// `None` when VAPID keys aren't configured.
+    pub push: Option<Arc<push::Push>>,
 }
 
 #[tokio::main]
@@ -40,6 +43,9 @@ async fn main() {
     // `api healthcheck` lets the distroless image (no curl) probe itself for Docker/Coolify.
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
         std::process::exit(if healthcheck().await { 0 } else { 1 });
+    }
+    if std::env::args().nth(1).as_deref() == Some("vapid-keys") {
+        return push::print_new_keys();
     }
 
     tracing_subscriber::fmt()
@@ -69,6 +75,7 @@ async fn main() {
             EncodingKey::from_secret(config.jwt_secret.as_bytes()),
             DecodingKey::from_secret(config.jwt_secret.as_bytes()),
         )),
+        push: push::Push::from_env(&config.web_url),
         config: Arc::new(config),
     };
 
@@ -107,6 +114,7 @@ async fn main() {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::HeaderName::from_static(lists::TOKEN_HEADER),
+            header::HeaderName::from_static(push::DEVICE_HEADER),
         ])
         .allow_credentials(true)
         .max_age(Duration::from_secs(86400));
@@ -114,6 +122,7 @@ async fn main() {
     let app = Router::new()
         .merge(lists::router())
         .merge(auth::router())
+        .merge(push::router())
         .layer(GovernorLayer::new(governor))
         .route("/ws", get(realtime::ws_handler))
         .route("/health", get(|| async { "ok" }))

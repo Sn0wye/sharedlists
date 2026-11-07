@@ -34,12 +34,53 @@ OAuth callback URLs to register:
 - Google: `$PUBLIC_URL/auth/google/callback`
 - GitHub: `$PUBLIC_URL/auth/github/callback`
 
+## Offline
+
+Everything inside a list works without a connection. Each change goes into an outbox in IndexedDB (`web/src/lib/offline.ts`) and is sent in order when the API is reachable again: on the `online` event, when the app comes back to the foreground, after any request that succeeds, and with backoff up to a minute. The last copy of each list opened on the device is kept too, so the app opens and searches offline.
+
+| Feature | Offline | How |
+|---|---|---|
+| Home screen, pins, title search | ✅ | Already local (`localStorage`) |
+| Item search | ✅ | Searches the copies of lists opened on this device; online it asks the API |
+| Open a list | ✅ | If it was opened on this device before |
+| Add an item, paste several lines | ✅ | Queued; consecutive adds go as one batch request |
+| Tick, quantity, reorder | ✅ | Queued |
+| Delete an item, clear done, Desfazer | ✅ | Queued; clear done deletes exactly the items shown as done |
+| Rename a list | ✅ | Queued |
+| Share the link | ✅ | System share sheet or clipboard |
+| Tirar da tela inicial | ⚠️ | Removed from this device right away; for logged-in users the account copy is removed only online, so it can come back on another device |
+| Create or delete a list | ❌ | The server creates the token; deleting removes the list for everyone, so it isn't queued |
+| Open a link never opened on this device | ❌ | No copy yet |
+| Presence, typing, live updates, notifications, login | ❌ | Need the server; the top bar shows "Reconectando…" |
+
+Conflicts, with the server as the source of truth:
+- Every write is idempotent. Item ids are generated on the device, so a retried add that already landed (409) counts as done. Ticks, quantities and titles send the final value, not a change. A move says "right after item X". Deleting an item that is already gone counts as done.
+- Changes are applied in the order they reach the server, so the last one wins, the same as two people tapping at once online.
+- Deleting wins over editing. An edit or move on an item someone else deleted is dropped, and so is everything queued for a deleted list.
+- Queued changes to the same item collapse until their first send attempt: tick then untick sends only the final value, a burst of quantity taps or moves sends the last one, add then delete sends nothing, and delete then undo cancels the delete. A change that was already attempted is never collapsed, because the server may have it; the opposite change is sent after it instead.
+- Undo for a delete that already reached the server uses the server's trash, which keeps items for a few minutes. After that, the undo is dropped.
+- If the server rejects a change, it is dropped with a toast and the list is fetched again.
+
+Pending changes show up only after sending fails: a pill in the top bar ("2 alterações pendentes") and a small clock next to each affected item.
+
+## Notifications
+
+The bell in a list's top bar subscribes this device to Web Push for that list: you get a notification when someone else adds an item. It works without logging in. The browser generates a random device id (`localStorage` `sl_device`), which is its only credential, and registers its push subscription under it.
+
+- `cargo run -- vapid-keys` prints a key pair. Set `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT` (a `mailto:` or `https:` URL) on the API. Without them push is off and the bell is hidden.
+- `GET /push/key`, `POST /push/devices/{device}` (refresh the subscription), `GET /push/devices/{device}/lists`, `POST /push/devices/{device}/lists` with `X-List-Token` (follow), `DELETE /push/devices/{device}/lists/{list}` (unfollow).
+- Following takes the list's link token, like reading it does, because notifications carry item text.
+- Item adds send `X-Device-Id`, so the author's own device is not notified. A pasted list is one notification ("Ana adicionou 5 itens: …"). Notifications for one list share a tag, so a burst of adds replaces one notification.
+- The server only stores the token's hash, so a notification links to `/list/?id=<id>` and the app finds the token among the lists saved on the device. Tirar da tela inicial unfollows the list.
+- Subscriptions are only accepted for the known push services (FCM, Mozilla, Apple, WNS), so the API never posts to an arbitrary URL. A subscription the push service reports as gone (404/410) is deleted.
+- On iPhone and iPad, push only works once the app is added to the Home Screen (iOS 16.4+). There, the bell explains this.
+
 ## Deploy
 
 **API on Coolify**: `.github/workflows/docker-publish.yml` builds `api/Dockerfile` for linux/arm64 on every push to `main` that touches `api/`. It pushes `ghcr.io/<owner>/<repo>:latest` and calls the Coolify webhook.
 
 1. In Coolify, create a Postgres database and a "Docker Image" application using `ghcr.io/<owner>/<repo>:latest`, port 8080.
-2. Set env vars from `api/.env.example`. `DATABASE_URL` is Coolify's internal Postgres URL. Generate `JWT_SECRET` with `openssl rand -base64 48`.
+2. Set env vars from `api/.env.example`. `DATABASE_URL` is Coolify's internal Postgres URL. Generate `JWT_SECRET` with `openssl rand -base64 48`. For notifications, generate the VAPID key once with `cargo run -- vapid-keys` and keep it: changing it invalidates every subscription.
 3. Add the repo secrets `COOLIFY_WEBHOOK` (the app's deploy webhook URL) and `COOLIFY_TOKEN` (a Coolify API token).
 4. The image includes a Docker `HEALTHCHECK` (`/app/api healthcheck`). The image is distroless and has no curl, so turn off Coolify's own curl-based health check.
 
