@@ -85,7 +85,8 @@ export function GroupView() {
     },
     [load],
   );
-  const connection = useRealtime(token, null, onEvent, load);
+  // A dead link would otherwise keep retrying the socket forever.
+  const connection = useRealtime(missing ? null : token, null, onEvent, load);
 
   if (missing || !token) {
     return (

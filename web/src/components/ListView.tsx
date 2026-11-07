@@ -84,7 +84,8 @@ export function ListView() {
     },
     [router, token, load],
   );
-  const connection = useRealtime(token, id, onEvent, load);
+  // A dead link would otherwise keep retrying the socket forever.
+  const connection = useRealtime(missing ? null : token, id, onEvent, load);
 
   function settle(itemId: string) {
     setSettling((s) => new Set(s).add(itemId));
