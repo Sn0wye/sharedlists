@@ -388,7 +388,9 @@ function TopBar({ offline, title, listId }: { offline?: boolean; title?: string;
     }
   }
   return (
-    <header className="sticky top-0 z-20 bg-bg/85 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+    // Side insets on the full-width header keep the buttons clear of the notch in landscape
+    // without shifting the centered row away from the title below.
+    <header className="sticky top-0 z-20 bg-bg/85 pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur-xl">
       <div className="mx-auto flex h-12 max-w-lg items-center px-2">
         <Link href="/" className="press -ml-1 flex h-10 items-center pr-3 pl-1 font-medium">
           <ChevronLeft />
@@ -408,7 +410,8 @@ function TopBar({ offline, title, listId }: { offline?: boolean; title?: string;
           )}
         </AnimatePresence>
         {title && listId && (
-          <div className="ml-auto flex">
+          <div className="ml-auto flex gap-1">
+            {/* 44px targets with a gap, so a thumb aimed at one doesn't land on the other. */}
             <button
               onClick={() => {
                 setPinned(listId, !isPinned);
@@ -416,11 +419,11 @@ function TopBar({ offline, title, listId }: { offline?: boolean; title?: string;
               }}
               aria-label={isPinned ? "Desafixar lista" : "Fixar lista no topo"}
               aria-pressed={isPinned}
-              className="press grid size-10 place-items-center"
+              className="press grid size-11 place-items-center"
             >
               <Pin filled={isPinned} />
             </button>
-            <button onClick={share} aria-label="Compartilhar lista" className="press grid size-10 place-items-center">
+            <button onClick={share} aria-label="Compartilhar lista" className="press grid size-11 place-items-center">
               <Share />
             </button>
           </div>

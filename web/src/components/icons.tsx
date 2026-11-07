@@ -79,8 +79,10 @@ export const Search = ({ className = "size-[18px]" }: Props) => (
   </svg>
 );
 
-export const Pin = ({ className = "size-5", filled = false }: Props & { filled?: boolean }) => (
+/** Lucide "pin" (ISC). Same 24px box and stroke as Share so they sit as a pair in the top bar. */
+export const Pin = ({ className = "size-6", filled = false }: Props & { filled?: boolean }) => (
   <svg viewBox="0 0 24 24" className={className} {...base} fill={filled ? "currentColor" : "none"}>
-    <path d="M9 4h6l-1 6 3.5 3.5v1.5h-11v-1.5L10 10 9 4ZM12 15v5" />
+    <path d="M12 17v5" />
+    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
   </svg>
 );
