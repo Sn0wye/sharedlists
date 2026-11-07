@@ -116,7 +116,6 @@ export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActiv
               {item.text}
             </span>
             {byline && <span className="mt-0.5 block text-[13px] text-text-2">{byline}</span>}
-            {hereLabel && <span className="sr-only">{hereLabel}</span>}
           </span>
         </motion.button>
         {!readOnly && (
@@ -129,6 +128,8 @@ export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActiv
           </button>
         )}
       </motion.div>
+      {/* Outside the checkbox so its accessible name stays the item text. */}
+      {hereLabel && <span className="sr-only">{hereLabel}</span>}
     </motion.li>
   );
 }
