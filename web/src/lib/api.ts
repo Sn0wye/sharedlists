@@ -18,6 +18,9 @@ export type Item = {
   list_id: string;
   text: string;
   done: boolean;
+  /** Fractional order key; compare as plain strings. */
+  position: string;
+  quantity: number;
   created_by_name: string | null;
   done_by_name: string | null;
   created_at: string;

@@ -1,9 +1,10 @@
 "use client";
 
-import { AnimatePresence, motion } from "motion/react";
+import { generateKeyBetween } from "fractional-indexing";
+import { AnimatePresence, motion, Reorder } from "motion/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Sheet } from "./Sheet";
 import { api, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
 import { useAuth, useRealtime } from "@/lib/hooks";
@@ -18,6 +19,8 @@ import { ProgressRing } from "./ProgressRing";
 
 /** A toggled item holds its place this long so the check and strike land before it moves. */
 const SETTLE_MS = 650;
+/** Quantity taps are sent once they stop, so a burst of "+" is one request. */
+const QUANTITY_DEBOUNCE_MS = 400;
 
 type Detail = ListDetail | null;
 const withItems = (fn: (items: Item[]) => Item[]) => (d: Detail) => d && { ...d, items: fn(d.items) };
@@ -25,6 +28,19 @@ const upserting = (item: Item) => withItems((items) => [...items.filter((i) => i
 const removing = (id: string) => withItems((items) => items.filter((i) => i.id !== id));
 
 const haptic = () => navigator.vibrate?.(8);
+
+/** Manual order: by order key, ties (concurrent writers) broken by id like the server does. */
+const byPosition = (a: Item, b: Item) =>
+  a.position < b.position ? -1 : a.position > b.position ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/** A key between two neighbours, or null if they tie and there is no room (the server sorts it out). */
+function keyBetween(a: string | null, b: string | null): string | null {
+  try {
+    return generateKeyBetween(a, b);
+  } catch {
+    return null;
+  }
+}
 
 export function ListView() {
   const token = useSearchParams().get("t");
@@ -38,6 +54,9 @@ export function ListView() {
   const [loaded, setLoaded] = useState(false);
   const [missing, setMissing] = useState(false);
   const [settling, setSettling] = useState<ReadonlySet<string>>(new Set());
+  /** Order of open items while a drag is in progress; null otherwise. */
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null);
+  const quantityTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const presence = usePresence();
   const { receive } = presence;
 
@@ -98,12 +117,18 @@ export function ListView() {
     );
   }
 
-  // Open items first (oldest on top), done items below by completion time.
+  // Open items first in their manual order, done items below by completion time.
   const sunk = (i: Item) => i.done && !settling.has(i.id);
-  const sortKey = (i: Item) => (sunk(i) ? (i.done_at ?? "") : i.created_at);
-  const items = [...(detail?.items ?? [])].sort(
-    (a, b) => Number(sunk(a)) - Number(sunk(b)) || sortKey(a).localeCompare(sortKey(b)),
-  );
+  const all = detail?.items ?? [];
+  const byId = new Map(all.map((i) => [i.id, i]));
+  const sortedOpen = all.filter((i) => !sunk(i)).sort(byPosition);
+  const done = all.filter(sunk).sort((a, b) => (a.done_at ?? "").localeCompare(b.done_at ?? ""));
+  // Mid-drag, keep the dragged order but still pick up items that came or went meanwhile.
+  const openIds = sortedOpen.map((i) => i.id);
+  const order = dragOrder
+    ? [...dragOrder.filter((id) => byId.has(id) && openIds.includes(id)), ...openIds.filter((id) => !dragOrder.includes(id))]
+    : openIds;
+  const items = [...order.map((id) => byId.get(id)!), ...done];
 
   if (missing || !token) {
     return (
@@ -123,23 +148,38 @@ export function ListView() {
   // Narrowed copy for the closures below; `token` itself is string | null.
   const key = token;
 
-  async function add(text: string) {
-    const item: Item = {
-      id: uuid(),
-      list_id: detail?.list.id ?? "",
-      text,
-      done: false,
-      created_by_name: user?.username ?? null,
-      done_by_name: null,
-      created_at: new Date().toISOString(),
-      done_at: null,
-    };
-    upsert(item);
+  async function add(texts: string[]) {
+    let last = all.reduce<string | null>((max, i) => (max === null || i.position > max ? i.position : max), null);
+    const created: Item[] = texts.map((text) => {
+      last = keyBetween(last, null) ?? last;
+      return {
+        id: uuid(),
+        list_id: detail?.list.id ?? "",
+        text,
+        done: false,
+        position: last ?? "a0",
+        quantity: 1,
+        created_by_name: user?.username ?? null,
+        done_by_name: null,
+        created_at: new Date().toISOString(),
+        done_at: null,
+      };
+    });
+    created.forEach(upsert);
     try {
-      await api("/list/items", { method: "POST", body: { id: item.id, text }, token: key });
+      if (created.length === 1) {
+        await api("/list/items", { method: "POST", body: { id: created[0].id, text: created[0].text }, token: key });
+      } else {
+        await api("/list/items/batch", {
+          method: "POST",
+          body: { items: created.map(({ id, text }) => ({ id, text })) },
+          token: key,
+        });
+        toast(`${created.length} itens adicionados`);
+      }
     } catch {
-      remove(item.id);
-      toast("Não deu para adicionar o item.");
+      created.forEach((i) => remove(i.id));
+      toast(created.length === 1 ? "Não deu para adicionar o item." : "Não deu para adicionar os itens.");
     }
   }
 
@@ -156,33 +196,87 @@ export function ListView() {
     }
   }
 
+  function setQuantity(item: Item, quantity: number) {
+    upsert({ ...item, quantity });
+    const timers = quantityTimers.current;
+    clearTimeout(timers.get(item.id));
+    timers.set(
+      item.id,
+      setTimeout(async () => {
+        timers.delete(item.id);
+        try {
+          await api(`/items/${item.id}`, { method: "PATCH", body: { quantity }, token: key });
+        } catch {
+          load();
+          toast("Não deu para salvar. Confira sua conexão.");
+        }
+      }, QUANTITY_DEBOUNCE_MS),
+    );
+  }
+
+  /** Puts `item` where it sits in `next` (open item ids), writing only its own position. */
+  async function move(item: Item, next: string[]) {
+    setDragOrder(null);
+    const at = next.indexOf(item.id);
+    const after = next[at - 1] ?? null;
+    if (at < 0 || after === (openIds[openIds.indexOf(item.id) - 1] ?? null)) return;
+    const position = keyBetween(byId.get(after ?? "")?.position ?? null, byId.get(next[at + 1] ?? "")?.position ?? null);
+    if (position) upsert({ ...item, position });
+    try {
+      upsert(await api<Item>(`/items/${item.id}/move`, { method: "POST", body: { after }, token: key }));
+    } catch {
+      load();
+      toast("Não deu para mover o item.");
+    }
+  }
+
+  function step(item: Item, by: -1 | 1) {
+    const at = openIds.indexOf(item.id);
+    const to = at + by;
+    if (at < 0 || to < 0 || to >= openIds.length) return;
+    const next = [...openIds];
+    next.splice(at, 1);
+    next.splice(to, 0, item.id);
+    void move(item, next);
+  }
+
   async function del(item: Item) {
     remove(item.id);
     try {
       await api(`/items/${item.id}`, { method: "DELETE", token: key });
-      toast({ message: "Item removido", action: { label: "Desfazer", onClick: () => restore(item) } });
+      toast({ message: "Item removido", action: { label: "Desfazer", onClick: () => restore([item]) } });
     } catch {
       upsert(item);
       toast("Não deu para remover o item.");
     }
   }
 
-  async function restore(item: Item) {
-    upsert(item);
+  /** Undo: the server keeps deleted items for a few minutes and puts them back as they were. */
+  async function restore(gone: Item[]) {
+    gone.forEach(upsert);
     try {
-      await api("/list/items", { method: "POST", body: { id: item.id, text: item.text }, token: key });
-      if (item.done) await api(`/items/${item.id}`, { method: "PATCH", body: { done: true }, token: key });
+      const back = await api<Item[]>("/list/items/restore", {
+        method: "POST",
+        body: { ids: gone.map((i) => i.id) },
+        token: key,
+      });
+      back.forEach(upsert);
     } catch {
-      remove(item.id);
-      toast("Não deu para restaurar o item.");
+      gone.forEach((i) => remove(i.id));
+      toast(gone.length === 1 ? "Não deu para restaurar o item." : "Não deu para restaurar os itens.");
     }
   }
 
   async function clearDone() {
-    const before = detail?.items ?? [];
-    patchItems((all) => all.filter((i) => !i.done));
+    const before = all;
+    const cleared = all.filter((i) => i.done);
+    patchItems((items) => items.filter((i) => !i.done));
     try {
       await api("/list/clear-done", { method: "POST", token: key });
+      toast({
+        message: cleared.length === 1 ? "1 item removido" : `${cleared.length} itens removidos`,
+        action: { label: "Desfazer", onClick: () => restore(cleared) },
+      });
     } catch {
       patchItems(() => before);
       toast("Não deu para limpar os concluídos.");
@@ -211,20 +305,30 @@ export function ListView() {
             {loaded && items.length === 0 ? (
               <p className="pt-16 text-center text-[15px] text-text-2">Adicione o primeiro item aqui embaixo.</p>
             ) : (
-              <motion.ul layout className="mt-5 overflow-hidden rounded-2xl bg-surface">
+              <Reorder.Group
+                axis="y"
+                values={order}
+                onReorder={setDragOrder}
+                layout
+                className="mt-5 overflow-hidden rounded-2xl bg-surface"
+              >
                 <AnimatePresence initial={false}>
                   {items.map((item) => (
                     <ItemRow
                       key={item.id}
                       item={item}
+                      reorderable={!sunk(item)}
                       onToggle={toggle}
                       onDelete={del}
+                      onQuantity={setQuantity}
+                      onDrop={(i) => dragOrder && move(i, order)}
+                      onStep={step}
                       here={presence.at(item.id)}
                       onActive={() => presence.touch(item.id)}
                     />
                   ))}
                 </AnimatePresence>
-              </motion.ul>
+              </Reorder.Group>
             )}
 
             <div className="mt-4 flex flex-col items-start gap-1 px-1">

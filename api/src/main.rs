@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod error;
 mod lists;
+mod order_key;
 mod presence;
 mod realtime;
 
@@ -88,6 +89,7 @@ async fn main() {
             tick.tick().await;
             limiter.retain_recent();
             auth::delete_expired_sessions(&cleanup_state).await;
+            lists::purge_deleted_items(&cleanup_state).await;
         }
     });
 
