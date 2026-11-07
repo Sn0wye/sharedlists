@@ -286,7 +286,7 @@ function ListRow({ list, pinned, hit, showPin }: RowProps) {
         className="absolute inset-0 flex items-center bg-ink pl-7 text-on-ink"
       >
         <motion.span style={{ scale: iconScale }}>
-          <Pin filled={!pinned} />
+          <Pin className="size-5" filled={!pinned} />
         </motion.span>
       </motion.div>
 
