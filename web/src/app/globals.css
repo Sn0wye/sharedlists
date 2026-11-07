@@ -124,21 +124,25 @@ body {
   color: var(--text-2);
 }
 
-/* Desktop-only row delete; touch uses swipe, so the button takes no room there. */
-.row-delete {
+/* Desktop-only row actions (delete an item, pin a list); touch uses swipe, so they take no room there. */
+.row-delete,
+.row-action {
   opacity: 0;
   transition: opacity 120ms ease;
 }
-.row-delete:focus-visible {
+.row-delete:focus-visible,
+.row-action:focus-visible {
   opacity: 1;
 }
 @media (hover: hover) and (pointer: fine) {
-  .group:hover .row-delete {
+  .group:hover .row-delete,
+  .group:hover .row-action {
     opacity: 1;
   }
 }
 @media (hover: none) {
-  .row-delete {
+  .row-delete,
+  .row-action {
     display: none;
   }
 }

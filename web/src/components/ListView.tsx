@@ -9,10 +9,11 @@ import { Sheet } from "./Sheet";
 import { api, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
 import { useAuth, useRealtime } from "@/lib/hooks";
 import { usePresence } from "@/lib/presence";
+import { setPinned, usePinned } from "@/lib/pins";
 import { dropToken, findByToken, forgetList, isGone, patchList, rememberList } from "@/lib/saved";
 import { toast } from "@/lib/toast";
 import { Composer } from "./Composer";
-import { ChevronLeft, Share } from "./icons";
+import { ChevronLeft, Pin, Share } from "./icons";
 import { ItemRow } from "./ItemRow";
 import { PresenceStack, TypingIndicator } from "./Presence";
 import { ProgressRing } from "./ProgressRing";
@@ -288,7 +289,7 @@ export function ListView() {
 
   return (
     <>
-      <TopBar offline={connection === "offline"} title={detail?.list.title} />
+      <TopBar offline={connection === "offline"} title={detail?.list.title} listId={detail?.list.id} />
 
       <main className="mx-auto max-w-lg px-4 pb-[calc(6.5rem+env(safe-area-inset-bottom))]">
         {detail ? (
@@ -374,7 +375,9 @@ export function ListView() {
   );
 }
 
-function TopBar({ offline, title }: { offline?: boolean; title?: string }) {
+function TopBar({ offline, title, listId }: { offline?: boolean; title?: string; listId?: string }) {
+  const pinned = usePinned();
+  const isPinned = !!listId && pinned.includes(listId);
   async function share() {
     const url = location.href;
     if (navigator.share) {
@@ -404,10 +407,23 @@ function TopBar({ offline, title }: { offline?: boolean; title?: string }) {
             </motion.span>
           )}
         </AnimatePresence>
-        {title && (
-          <button onClick={share} aria-label="Compartilhar lista" className="press ml-auto grid size-10 place-items-center">
-            <Share />
-          </button>
+        {title && listId && (
+          <div className="ml-auto flex">
+            <button
+              onClick={() => {
+                setPinned(listId, !isPinned);
+                toast(isPinned ? "Lista desafixada" : "Fixada no topo da tela inicial");
+              }}
+              aria-label={isPinned ? "Desafixar lista" : "Fixar lista no topo"}
+              aria-pressed={isPinned}
+              className="press grid size-10 place-items-center"
+            >
+              <Pin filled={isPinned} />
+            </button>
+            <button onClick={share} aria-label="Compartilhar lista" className="press grid size-10 place-items-center">
+              <Share />
+            </button>
+          </div>
         )}
       </div>
     </header>

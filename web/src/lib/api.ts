@@ -32,6 +32,9 @@ export type ListDetail = { list: ListSummary; items: Item[] };
 /** A list with the secret link token that opens it. */
 export type LinkedList = { token: string; list: ListSummary };
 
+/** `POST /lists/search`: the first matching item of each list and how many items matched. */
+export type SearchHit = { list_id: string; text: string; matches: number };
+
 export type RealtimeEvent =
   | { type: "list_upserted"; list: ListSummary }
   | { type: "list_deleted"; id: string }

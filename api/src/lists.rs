@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/lists", post(create_list))
         .route("/lists/resolve", post(resolve_lists))
+        .route("/lists/search", post(search))
         .route("/list", get(get_list).patch(rename_list).delete(delete_list))
         .route("/list/items", post(create_item))
         .route("/list/items/batch", post(create_items))
@@ -288,6 +289,85 @@ async fn delete_list(State(state): State<AppState>, list: Access) -> AppResult<S
         .await?;
     state.hub.publish(list.id, &Event::ListDeleted { id: list.id });
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- search ----------
+
+/// Lowercases and strips Portuguese accents so "feijao" finds "Feijão". Applied to both sides
+/// in SQL; `translate` keeps this free of the `unaccent` extension.
+macro_rules! fold {
+    ($expr:literal) => {
+        concat!(
+            "lower(translate(",
+            $expr,
+            ", 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', \
+                'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN'))"
+        )
+    };
+}
+
+#[derive(Deserialize)]
+struct SearchBody {
+    q: String,
+    /// Link tokens of the lists to search: the ones saved on the device, as in `/lists/resolve`.
+    tokens: Vec<String>,
+}
+
+/// One row per list that has matching items: the first match (open items first, in list
+/// order) and how many matched.
+#[derive(Serialize, sqlx::FromRow)]
+struct SearchHit {
+    list_id: Uuid,
+    text: String,
+    matches: i64,
+}
+
+/// Item text search for the home screen, limited to lists whose tokens the caller sends, so it
+/// can't reach a list without its link. Titles are filtered on the client, which already has
+/// them. Sequential scan over those lists' items: fine at this scale, add pg_trgm if not.
+async fn search(
+    State(state): State<AppState>,
+    Json(body): Json<SearchBody>,
+) -> AppResult<Json<Vec<SearchHit>>> {
+    let q = body.q.trim();
+    if q.chars().count() < 2 || body.tokens.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    if q.chars().count() > MAX_TITLE {
+        return Err(AppError::BadRequest("query too long"));
+    }
+    if body.tokens.len() > MAX_RESOLVE {
+        return Err(AppError::BadRequest("too many tokens"));
+    }
+    let tokens: Vec<String> = body
+        .tokens
+        .into_iter()
+        .filter(|t| !t.is_empty() && t.len() <= MAX_TOKEN)
+        .collect();
+    // Escape LIKE wildcards so "50%" matches literally.
+    let pattern = format!(
+        "%{}%",
+        q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
+    let hits = sqlx::query_as(concat!(
+        "SELECT DISTINCT ON (i.list_id) i.list_id, i.text,
+                count(*) OVER (PARTITION BY i.list_id) AS matches
+         FROM items i
+         JOIN lists l ON l.id = i.list_id
+         JOIN (SELECT sha256(convert_to(token, 'UTF8')) AS hash
+               FROM unnest($2::text[]) AS token) t ON t.hash = l.token_hash
+         WHERE ",
+        fold!("i.text"),
+        " LIKE ",
+        fold!("$1"),
+        " ESCAPE '\\'
+         ORDER BY i.list_id, i.done, i.position, i.id"
+    ))
+    .bind(pattern)
+    .bind(&tokens)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(hits))
 }
 
 // ---------- items ----------
