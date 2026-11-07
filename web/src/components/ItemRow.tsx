@@ -13,15 +13,13 @@ type Props = {
   item: Item;
   onToggle: (item: Item) => void;
   onDelete: (item: Item) => void;
-  /** Opened through a read-only link: no ticking, swiping or deleting. */
-  readOnly?: boolean;
   /** Other people on this item right now; the first one's colour marks the row. */
   here?: Peer[];
   /** The user touched or focused this row. */
   onActive?: () => void;
 };
 
-export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActive }: Props) {
+export function ItemRow({ item, onToggle, onDelete, here = [], onActive }: Props) {
   const x = useMotionValue(0);
   const row = useRef<HTMLDivElement>(null);
   // Red backdrop and trash come into focus as the row slides away.
@@ -65,7 +63,7 @@ export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActiv
 
       <motion.div
         ref={row}
-        drag={readOnly ? false : "x"}
+        drag="x"
         dragDirectionLock
         dragConstraints={{ left: -REVEAL, right: 0 }}
         dragElastic={{ left: 0.12, right: 0 }}
@@ -94,10 +92,8 @@ export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActiv
         <motion.button
           role="checkbox"
           aria-checked={item.done}
-          aria-readonly={readOnly}
-          disabled={readOnly}
-          onTap={readOnly ? undefined : () => onToggle(item)}
-          whileTap={readOnly ? undefined : { scale: 0.985 }}
+          onTap={() => onToggle(item)}
+          whileTap={{ scale: 0.985 }}
           transition={{ duration: 0.12 }}
           className="relative flex min-h-14 min-w-0 flex-1 items-start gap-3.5 py-3.5 pl-4 pr-3 text-left"
         >
@@ -118,15 +114,13 @@ export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActiv
             {byline && <span className="mt-0.5 block text-[13px] text-text-2">{byline}</span>}
           </span>
         </motion.button>
-        {!readOnly && (
-          <button
-            onClick={() => onDelete(item)}
-            aria-label={`Remover ${item.text}`}
-            className="row-delete relative grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
-          >
-            <X />
-          </button>
-        )}
+        <button
+          onClick={() => onDelete(item)}
+          aria-label={`Remover ${item.text}`}
+          className="row-delete relative grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
+        >
+          <X />
+        </button>
       </motion.div>
       {/* Outside the checkbox so its accessible name stays the item text. */}
       {hereLabel && <span className="sr-only">{hereLabel}</span>}

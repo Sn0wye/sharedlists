@@ -1,7 +1,6 @@
 mod auth;
 mod config;
 mod error;
-mod groups;
 mod lists;
 mod presence;
 mod realtime;
@@ -105,14 +104,13 @@ async fn main() {
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
-            header::HeaderName::from_static(groups::TOKEN_HEADER),
+            header::HeaderName::from_static(lists::TOKEN_HEADER),
         ])
         .allow_credentials(true)
         .max_age(Duration::from_secs(86400));
 
     let app = Router::new()
         .merge(lists::router())
-        .merge(groups::router())
         .merge(auth::router())
         .layer(GovernorLayer::new(governor))
         .route("/ws", get(realtime::ws_handler))

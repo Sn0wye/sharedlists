@@ -13,13 +13,12 @@ export type Connection = "connecting" | "open" | "offline";
 export type RealtimeLink = { onOpen: (send: (msg: object) => void) => void; onClose: () => void };
 
 /**
- * Subscribes to live events for one list, or for the group's screen when `listId` is null.
+ * Subscribes to live events for the list `token` opens; does nothing while `token` is null.
  * Reconnects with backoff; `onResync` fires after a reconnect so the caller can refetch
  * whatever it missed while disconnected.
  */
 export function useRealtime(
   token: string | null,
-  listId: string | null,
   onEvent: (e: RealtimeEvent) => void,
   onResync: () => void,
   link?: RealtimeLink,
@@ -36,8 +35,7 @@ export function useRealtime(
     let retry: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
     let closed = false;
-    const query = new URLSearchParams({ group: token, ...(listId && { list: listId }) });
-    const url = `${API_URL.replace(/^http/, "ws")}/ws?${query}`;
+    const url = `${API_URL.replace(/^http/, "ws")}/ws?${new URLSearchParams({ list: token })}`;
 
     const connect = () => {
       const s = new WebSocket(url);
@@ -83,7 +81,7 @@ export function useRealtime(
       document.removeEventListener("visibilitychange", onVisible);
       socket?.close();
     };
-  }, [token, listId]);
+  }, [token]);
 
   return connection;
 }
