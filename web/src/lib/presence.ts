@@ -57,7 +57,7 @@ function colorFor(username: string) {
 
 export const peerName = (p: Peer) => p.name ?? "Alguém";
 export const peerColor = (p: Peer) => p.color ?? "var(--text-2)";
-const personKey = (p: Peer) => (p.name ? `${p.name}${p.color}` : p.id);
+const personKey = (p: Peer) => `${p.name}${p.color}`;
 
 /** Socket-side state and timers, created once per list view. */
 function createChannel(setPeers: (p: Peer[]) => void, setSelfId: (id: string | null) => void) {
@@ -156,8 +156,9 @@ export function usePresence() {
   useEffect(() => () => channel.dispose(), [channel]);
 
   const self = peers.find((p) => p.id === selfId) ?? null;
+  // Nameless peers haven't said hello yet (a split second after connecting); showing them would flash "Alguém".
   // Your other tabs share your name and colour; leave them out along with this one.
-  const others = peers.filter((p) => p.id !== selfId && !(self?.name && personKey(p) === personKey(self)));
+  const others = peers.filter((p) => p.name && p.id !== selfId && !(self?.name && personKey(p) === personKey(self)));
   const people = [...new Map(others.map((p) => [personKey(p), p])).values()];
   const typers = [...new Map(others.filter((p) => p.typing).map((p) => [personKey(p), p])).values()];
 
