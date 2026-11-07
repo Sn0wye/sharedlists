@@ -33,6 +33,18 @@ export const Plus = ({ className = "size-5" }: Props) => (
   </svg>
 );
 
+export const Minus = ({ className = "size-5" }: Props) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} strokeWidth={2.4}>
+    <path d="M5 12h14" />
+  </svg>
+);
+
+export const Grip = ({ className = "size-5" }: Props) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} strokeWidth={1.8}>
+    <path d="M5 8h14M5 12h14M5 16h14" />
+  </svg>
+);
+
 export const Trash = ({ className = "size-5" }: Props) => (
   <svg viewBox="0 0 24 24" className={className} {...base}>
     <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />

@@ -4,15 +4,28 @@ import { AnimatePresence, motion } from "motion/react";
 import { useRef, useState, type ReactNode } from "react";
 import { ArrowUp } from "./icons";
 
+const MAX_LINES = 200;
+
+/** One pasted line as an item: list markers ("- ", "• ", "1. ", "[ ] ") dropped, too-long lines cut. */
+const pastedLine = (line: string) =>
+  line
+    .replace(/^\s*(?:[-*+•·–—]|\[[ xX]?\]|\d{1,3}[.)])\s+/, "")
+    .trim()
+    .slice(0, 500);
+
 type Props = {
-  onAdd: (text: string) => void;
+  /** One text per item; pasting several lines adds them all at once. */
+  onAdd: (texts: string[]) => void;
   /** Called on every change with whether the field holds text, and with `false` on send or blur. */
   onTyping?: (active: boolean) => void;
   /** A line shown above the field, inside the bar (who else is typing). */
   status?: ReactNode;
 };
 
-/** Fixed bottom bar for adding items. Keeps the keyboard open so several items can be typed in a row. */
+/**
+ * Fixed bottom bar for adding items. Keeps the keyboard open so several items can be typed in a row.
+ * Pasting several lines adds one item per line.
+ */
 export function Composer({ onAdd, onTyping, status }: Props) {
   const [text, setText] = useState("");
   const input = useRef<HTMLInputElement>(null);
@@ -21,10 +34,18 @@ export function Composer({ onAdd, onTyping, status }: Props) {
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!ready) return;
-    onAdd(text.trim());
+    onAdd([text.trim()]);
     setText("");
     onTyping?.(false);
     input.current?.focus();
+  }
+
+  // A text input would flatten the lines into one, so take over only when there are several.
+  function paste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const lines = e.clipboardData.getData("text").split(/\r?\n/).map(pastedLine).filter(Boolean);
+    if (lines.length < 2) return;
+    e.preventDefault();
+    onAdd(lines.slice(0, MAX_LINES));
   }
 
   return (
@@ -42,6 +63,7 @@ export function Composer({ onAdd, onTyping, status }: Props) {
             onTyping?.(e.target.value.trim().length > 0);
           }}
           onBlur={() => onTyping?.(false)}
+          onPaste={paste}
           maxLength={500}
           placeholder="Novo item"
           aria-label="Novo item"
