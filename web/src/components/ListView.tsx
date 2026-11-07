@@ -29,11 +29,6 @@ export function ListView() {
   const id = params.get("id");
   const token = params.get("t");
   const router = useRouter();
-  const groupName = useSyncExternalStore(
-    groupStore.subscribe,
-    () => groupStore.get().find((g) => g.token === token)?.name,
-    () => undefined,
-  );
   const { user } = useAuth();
   const [detail, setDetail] = useState<Detail>(() => {
     const cached = id && summaryCache.get(id);
@@ -42,6 +37,13 @@ export function ListView() {
     return cached ? { list: cached, items: [], role } : null;
   });
   const [loaded, setLoaded] = useState(false);
+  // Matched by id too: this device may have saved the edit link while viewing through the read-only one.
+  const groupId = detail?.list.group_id;
+  const groupName = useSyncExternalStore(
+    groupStore.subscribe,
+    () => groupStore.get().find((g) => g.token === token || g.id === groupId)?.name,
+    () => undefined,
+  );
   const [missing, setMissing] = useState(false);
   const [presence, setPresence] = useState(1);
   const [settling, setSettling] = useState<ReadonlySet<string>>(new Set());
