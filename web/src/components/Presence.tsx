@@ -60,14 +60,14 @@ export function PresenceStack({ people, self }: { people: Peer[]; self: Peer | n
               animate={{ opacity: 1, transform: "scale(1)" }}
               exit={{ opacity: 0, transform: "scale(0.6)" }}
               transition={{ type: "spring", duration: 0.35, bounce: 0.2 }}
-              className={`rounded-full ring-2 ring-bg ${i > 0 ? "-ml-1.5" : ""}`}
+              className={`rounded-full ring-2 ring-bg ${i > 0 ? "-ml-1" : ""}`}
             >
               <Avatar peer={p} />
             </motion.span>
           ))}
         </AnimatePresence>
         {extra > 0 && (
-          <span className="-ml-1.5 grid h-[22px] min-w-[22px] place-items-center rounded-full bg-surface px-1 text-[11px] font-semibold text-text-2 tabular-nums ring-2 ring-bg">
+          <span className="-ml-1 grid h-[22px] min-w-[22px] place-items-center rounded-full bg-surface px-1 text-[11px] font-semibold text-text-2 tabular-nums ring-2 ring-bg">
             +{extra}
           </span>
         )}
