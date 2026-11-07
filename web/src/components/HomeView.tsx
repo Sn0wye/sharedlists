@@ -3,59 +3,46 @@
 import { AnimatePresence, motion } from "motion/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import { api, summaryCache, uuid, type ListSummary, type RealtimeEvent } from "@/lib/api";
-import { useRealtime } from "@/lib/hooks";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { api, type GroupLinks } from "@/lib/api";
+import { groupStore, groupUrl, rememberGroup, syncGroups, type SavedGroup } from "@/lib/groups";
+import { useAuth } from "@/lib/hooks";
 import { toast } from "@/lib/toast";
 import { AccountButton } from "./AccountButton";
 import { Plus } from "./icons";
-import { ProgressRing } from "./ProgressRing";
 import { Sheet, sheetInput, sheetPrimary } from "./Sheet";
 
-const byActivity = (a: ListSummary, b: ListSummary) => b.updated_at.localeCompare(a.updated_at);
 const SPRING = { type: "spring", duration: 0.45, bounce: 0 } as const;
+const noop = () => () => {};
 
 export function HomeView() {
   const router = useRouter();
-  const [lists, setLists] = useState<ListSummary[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  const { status, user } = useAuth();
+  const saved = useSyncExternalStore(groupStore.subscribe, groupStore.get, () => groupStore.serverSnapshot);
+  // localStorage is unknown during the static render; don't flash the empty state.
+  const hydrated = useSyncExternalStore(noop, () => true, () => false);
   const [composing, setComposing] = useState(false);
-  const [title, setTitle] = useState("");
+  const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const load = useCallback(() => {
-    api<ListSummary[]>("/lists")
-      .then((l) => {
-        l.forEach((s) => summaryCache.set(s.id, s));
-        setLists(l);
-        setFailed(false);
-      })
-      .catch(() => setFailed(true));
-  }, []);
-  useEffect(load, [load]);
+  const userId = user?.id;
+  useEffect(() => {
+    if (status === "ready") syncGroups().catch(() => {});
+  }, [status, userId]);
 
-  const onEvent = useCallback((e: RealtimeEvent) => {
-    if (e.type === "list_upserted") {
-      summaryCache.set(e.list.id, e.list);
-      setLists((prev) => prev && [e.list, ...prev.filter((l) => l.id !== e.list.id)].sort(byActivity));
-    } else if (e.type === "list_deleted") {
-      setLists((prev) => prev && prev.filter((l) => l.id !== e.id));
-    }
-  }, []);
-  useRealtime(null, onEvent, load);
+  const groups = [...saved].sort((a, b) => b.opened_at - a.opened_at);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
-    const clean = title.trim();
+    const clean = name.trim();
     if (!clean || creating) return;
     setCreating(true);
-    const id = uuid();
     try {
-      const list = await api<ListSummary>("/lists", { method: "POST", body: { id, title: clean } });
-      summaryCache.set(id, list);
-      router.push(`/list/?id=${id}`);
+      const links = await api<GroupLinks>("/groups", { method: "POST", body: { name: clean } });
+      rememberGroup(links.group, links.edit_token);
+      router.push(groupUrl(links.edit_token));
     } catch {
-      toast("Não deu para criar a lista. Confira sua conexão.");
+      toast("Não deu para criar o grupo. Confira sua conexão.");
       setCreating(false);
     }
   }
@@ -68,39 +55,34 @@ export function HomeView() {
       </header>
 
       <main className="mx-auto max-w-lg px-4 pb-[calc(7rem+env(safe-area-inset-bottom))]">
-        {failed && !lists ? (
+        {!hydrated ? null : groups.length === 0 ? (
           <Empty>
-            Não foi possível carregar as listas.{" "}
-            <button onClick={load} className="font-semibold text-text underline underline-offset-4">
-              Tentar de novo
-            </button>
+            Nenhum grupo neste aparelho. Crie um grupo e mande o link para quem vai usar junto. Quem tem o link
+            entra sem cadastro.
           </Empty>
-        ) : !lists ? (
-          <div aria-hidden className="overflow-hidden rounded-2xl bg-surface">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="h-14 animate-pulse border-b border-sep last:border-b-0" />
-            ))}
-          </div>
-        ) : lists.length === 0 ? (
-          <Empty>Nenhuma lista ainda. Crie a primeira e mande o link para quem vai usar junto.</Empty>
         ) : (
-          <motion.ul layout className="overflow-hidden rounded-2xl bg-surface">
-            <AnimatePresence initial={false}>
-              {lists.map((list) => (
-                <motion.li
-                  key={list.id}
-                  layout="position"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ layout: SPRING, opacity: { duration: 0.2 }, height: { duration: 0.2 } }}
-                  className="overflow-hidden border-b border-sep last:border-b-0"
-                >
-                  <ListRow list={list} />
-                </motion.li>
-              ))}
-            </AnimatePresence>
-          </motion.ul>
+          <>
+            <motion.ul layout className="overflow-hidden rounded-2xl bg-surface">
+              <AnimatePresence initial={false}>
+                {groups.map((group) => (
+                  <motion.li
+                    key={group.id}
+                    layout="position"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ layout: SPRING, opacity: { duration: 0.2 }, height: { duration: 0.2 } }}
+                    className="overflow-hidden border-b border-sep last:border-b-0"
+                  >
+                    <GroupRow group={group} />
+                  </motion.li>
+                ))}
+              </AnimatePresence>
+            </motion.ul>
+            {status === "ready" && !user && (
+              <p className="px-5 pt-3 text-[13px] text-text-2">Entre com uma conta para ver seus grupos em outros aparelhos.</p>
+            )}
+          </>
         )}
       </main>
 
@@ -110,7 +92,7 @@ export function HomeView() {
           className="press pointer-events-auto flex h-13 items-center gap-2 rounded-full bg-ink pr-6 pl-5 text-[17px] font-semibold text-on-ink shadow-[0_10px_30px_rgb(0_0_0/0.22)]"
         >
           <Plus />
-          Nova lista
+          Novo grupo
         </button>
       </div>
 
@@ -118,22 +100,23 @@ export function HomeView() {
         open={composing}
         onOpenChange={(open) => {
           setComposing(open);
-          if (!open) setTitle("");
+          if (!open) setName("");
         }}
-        title="Nova lista"
+        title="Novo grupo"
+        description="Um grupo junta listas de quem usa junto. Quem tem o link vê e edita tudo."
       >
         <form onSubmit={create}>
           <input
             autoFocus
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            maxLength={100}
-            placeholder="Mercado, viagem, churrasco…"
-            aria-label="Nome da lista"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={60}
+            placeholder="Casa, viagem, trabalho…"
+            aria-label="Nome do grupo"
             enterKeyHint="done"
             className={sheetInput}
           />
-          <button disabled={creating || !title.trim()} className={sheetPrimary}>
+          <button disabled={creating || !name.trim()} className={sheetPrimary}>
             {creating ? "Criando…" : "Criar"}
           </button>
         </form>
@@ -142,14 +125,21 @@ export function HomeView() {
   );
 }
 
-function ListRow({ list }: { list: ListSummary }) {
-  const { item_count: total, done_count: done } = list;
+function GroupRow({ group }: { group: SavedGroup }) {
+  const count = group.list_count === 1 ? "1 lista" : `${group.list_count} listas`;
   return (
     <motion.div whileTap={{ scale: 0.98 }} transition={{ duration: 0.12 }}>
-      <Link href={`/list/?id=${list.id}`} className="flex h-14 items-center gap-3 px-4">
-        <ProgressRing done={done} total={total} size={22} stroke={2.25} />
-        <span className="min-w-0 flex-1 truncate font-medium">{list.title}</span>
-        <span className="text-[15px] text-text-2 tabular-nums">{total === 0 ? "" : `${done}/${total}`}</span>
+      <Link href={groupUrl(group.token)} className="flex h-14 items-center gap-3 px-4">
+        <span
+          aria-hidden
+          className="grid size-[30px] shrink-0 place-items-center rounded-full bg-bg text-[15px] font-semibold"
+        >
+          {Array.from(group.name)[0]?.toUpperCase()}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-medium">{group.name}</span>
+        <span className="text-[15px] text-text-2 tabular-nums">
+          {group.role === "read" ? `Só ver · ${count}` : count}
+        </span>
       </Link>
     </motion.div>
   );

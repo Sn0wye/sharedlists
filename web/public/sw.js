@@ -1,6 +1,6 @@
 // Offline shell for the installable app. API and WebSocket traffic (another origin) is never cached.
 const CACHE = "listas-v2";
-const SHELL = ["/", "/list/", "/auth/callback/", "/manifest.webmanifest", "/icon-192.png"];
+const SHELL = ["/", "/g/", "/list/", "/auth/callback/", "/manifest.webmanifest", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
