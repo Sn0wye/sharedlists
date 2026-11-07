@@ -3,12 +3,12 @@
 import { AnimatePresence, motion } from "motion/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Sheet } from "./Sheet";
-import { api, ApiError, summaryCache, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
-import { findGroupByToken, groupStore, groupUrl } from "@/lib/groups";
+import { api, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
 import { useAuth, useRealtime } from "@/lib/hooks";
 import { usePresence } from "@/lib/presence";
+import { dropToken, findByToken, forgetList, isGone, patchList, rememberList } from "@/lib/saved";
 import { toast } from "@/lib/toast";
 import { Composer } from "./Composer";
 import { ChevronLeft, Share } from "./icons";
@@ -27,42 +27,34 @@ const removing = (id: string) => withItems((items) => items.filter((i) => i.id !
 const haptic = () => navigator.vibrate?.(8);
 
 export function ListView() {
-  const params = useSearchParams();
-  const id = params.get("id");
-  const token = params.get("t");
+  const token = useSearchParams().get("t");
   const router = useRouter();
   const { user } = useAuth();
+  // A list opened before paints its title from the home screen's copy while the items load.
   const [detail, setDetail] = useState<Detail>(() => {
-    const cached = id && summaryCache.get(id);
-    // Until the server answers, assume the role this device saved for the link.
-    const role = (token && findGroupByToken(token)?.role) || "read";
-    return cached ? { list: cached, items: [], role } : null;
+    const saved = token && findByToken(token);
+    return saved ? { list: saved, items: [] } : null;
   });
   const [loaded, setLoaded] = useState(false);
-  // Matched by id too: this device may have saved the edit link while viewing through the read-only one.
-  const groupId = detail?.list.group_id;
-  const groupName = useSyncExternalStore(
-    groupStore.subscribe,
-    () => groupStore.get().find((g) => g.token === token || g.id === groupId)?.name,
-    () => undefined,
-  );
   const [missing, setMissing] = useState(false);
   const [settling, setSettling] = useState<ReadonlySet<string>>(new Set());
   const presence = usePresence();
   const { receive } = presence;
 
   const load = useCallback(() => {
-    if (!id || !token) return;
-    api<ListDetail>(`/lists/${id}`, { token })
+    if (!token) return;
+    api<ListDetail>("/list", { token })
       .then((d) => {
         setDetail(d);
         setLoaded(true);
+        rememberList({ token, list: d.list });
       })
       .catch((e) => {
-        if (e instanceof ApiError && (e.status === 404 || e.status === 400)) setMissing(true);
-        else toast("Sem conexão com o servidor. Tentando de novo…");
+        if (!isGone(e)) return toast("Sem conexão com o servidor. Tentando de novo…");
+        setMissing(true);
+        dropToken(token);
       });
-  }, [id, token]);
+  }, [token]);
   useEffect(load, [load]);
 
   const patchItems = (fn: (items: Item[]) => Item[]) => setDetail(withItems(fn));
@@ -77,21 +69,21 @@ export function ListView() {
         case "item_deleted":
           return setDetail(removing(e.id));
         case "list_upserted":
+          patchList(e.list);
           return setDetail((d) => d && { ...d, list: e.list });
         case "presence":
         case "presence_self":
           return receive(e);
         case "list_deleted":
+          if (token) dropToken(token);
           toast("Essa lista foi apagada.");
-          return router.replace(token ? groupUrl(token) : "/");
-        case "revoked":
-          return load();
+          return router.replace("/");
       }
     },
-    [router, token, load, receive],
+    [router, token, receive],
   );
   // A dead link would otherwise keep retrying the socket forever.
-  const connection = useRealtime(missing ? null : token, id, onEvent, load, presence.link);
+  const connection = useRealtime(missing ? null : token, onEvent, load, presence.link);
 
   function settle(itemId: string) {
     setSettling((s) => new Set(s).add(itemId));
@@ -113,32 +105,28 @@ export function ListView() {
     (a, b) => Number(sunk(a)) - Number(sunk(b)) || sortKey(a).localeCompare(sortKey(b)),
   );
 
-  if (missing || !id || !token) {
+  if (missing || !token) {
     return (
       <>
         <TopBar />
         <main className="mx-auto max-w-lg px-6 pt-16 text-center">
           <h1 className="text-[1.375rem] font-semibold tracking-[-0.01em]">Lista não encontrada</h1>
-          <p className="mt-2 text-[15px] text-balance text-text-2">
-            O link pode estar errado ou ter sido trocado por um novo, ou a lista foi apagada.
-          </p>
+          <p className="mt-2 text-[15px] text-text-2">O link pode estar errado ou a lista foi apagada.</p>
           <Link href="/" className="press mt-6 inline-flex h-11 items-center rounded-full bg-ink px-5 font-semibold text-on-ink">
-            Ver meus grupos
+            Ver minhas listas
           </Link>
         </main>
       </>
     );
   }
 
-  // Narrowed copies for the closures below.
-  const listId = id;
-  const groupToken = token;
-  const readOnly = detail?.role === "read";
+  // Narrowed copy for the closures below; `token` itself is string | null.
+  const key = token;
 
   async function add(text: string) {
     const item: Item = {
       id: uuid(),
-      list_id: listId,
+      list_id: detail?.list.id ?? "",
       text,
       done: false,
       created_by_name: user?.username ?? null,
@@ -148,7 +136,7 @@ export function ListView() {
     };
     upsert(item);
     try {
-      await api(`/lists/${listId}/items`, { method: "POST", body: { id: item.id, text }, token: groupToken });
+      await api("/list/items", { method: "POST", body: { id: item.id, text }, token: key });
     } catch {
       remove(item.id);
       toast("Não deu para adicionar o item.");
@@ -161,7 +149,7 @@ export function ListView() {
     upsert({ ...item, done, done_at: done ? new Date().toISOString() : null, done_by_name: done ? (user?.username ?? null) : null });
     settle(item.id);
     try {
-      await api(`/items/${item.id}`, { method: "PATCH", body: { done }, token: groupToken });
+      await api(`/items/${item.id}`, { method: "PATCH", body: { done }, token: key });
     } catch {
       upsert(item);
       toast("Não deu para salvar. Confira sua conexão.");
@@ -171,7 +159,7 @@ export function ListView() {
   async function del(item: Item) {
     remove(item.id);
     try {
-      await api(`/items/${item.id}`, { method: "DELETE", token: groupToken });
+      await api(`/items/${item.id}`, { method: "DELETE", token: key });
       toast({ message: "Item removido", action: { label: "Desfazer", onClick: () => restore(item) } });
     } catch {
       upsert(item);
@@ -182,8 +170,8 @@ export function ListView() {
   async function restore(item: Item) {
     upsert(item);
     try {
-      await api(`/lists/${listId}/items`, { method: "POST", body: { id: item.id, text: item.text }, token: groupToken });
-      if (item.done) await api(`/items/${item.id}`, { method: "PATCH", body: { done: true }, token: groupToken });
+      await api("/list/items", { method: "POST", body: { id: item.id, text: item.text }, token: key });
+      if (item.done) await api(`/items/${item.id}`, { method: "PATCH", body: { done: true }, token: key });
     } catch {
       remove(item.id);
       toast("Não deu para restaurar o item.");
@@ -194,7 +182,7 @@ export function ListView() {
     const before = detail?.items ?? [];
     patchItems((all) => all.filter((i) => !i.done));
     try {
-      await api(`/lists/${listId}/clear-done`, { method: "POST", token: groupToken });
+      await api("/list/clear-done", { method: "POST", token: key });
     } catch {
       patchItems(() => before);
       toast("Não deu para limpar os concluídos.");
@@ -206,30 +194,17 @@ export function ListView() {
 
   return (
     <>
-      <TopBar
-        offline={connection === "offline"}
-        title={detail?.list.title}
-        back={{ href: groupUrl(groupToken), label: groupName ?? "Grupo" }}
-      />
+      <TopBar offline={connection === "offline"} title={detail?.list.title} />
 
       <main className="mx-auto max-w-lg px-4 pb-[calc(6.5rem+env(safe-area-inset-bottom))]">
         {detail ? (
           <>
-            <Title
-              key={detail.list.title}
-              listId={detail.list.id}
-              title={detail.list.title}
-              token={groupToken}
-              readOnly={readOnly}
-            />
+            <Title key={detail.list.title} token={key} title={detail.list.title} />
             <div className="mt-2 flex items-center gap-2.5 text-[15px] text-text-2">
               <ProgressRing done={doneCount} total={total} size={20} stroke={2.25} />
               <span className="tabular-nums">
                 {!loaded ? "Carregando…" : total === 0 ? "Sem itens" : `${doneCount} de ${total}`}
               </span>
-              {readOnly && (
-                <span className="rounded-full bg-surface px-2.5 py-1 text-[13px] font-medium text-text">Só leitura</span>
-              )}
               <PresenceStack people={presence.people} self={presence.self} />
             </div>
 
@@ -244,9 +219,8 @@ export function ListView() {
                       item={item}
                       onToggle={toggle}
                       onDelete={del}
-                      readOnly={readOnly}
                       here={presence.at(item.id)}
-                      onActive={readOnly ? undefined : () => presence.touch(item.id)}
+                      onActive={() => presence.touch(item.id)}
                     />
                   ))}
                 </AnimatePresence>
@@ -255,7 +229,7 @@ export function ListView() {
 
             <div className="mt-4 flex flex-col items-start gap-1 px-1">
               <AnimatePresence>
-                {doneCount > 0 && !readOnly && (
+                {doneCount > 0 && (
                   <motion.button
                     key="clear"
                     initial={{ opacity: 0 }}
@@ -269,7 +243,16 @@ export function ListView() {
                   </motion.button>
                 )}
               </AnimatePresence>
-              {!readOnly && <DeleteListButton listId={detail.list.id} title={detail.list.title} token={groupToken} />}
+              <button
+                onClick={() => {
+                  void forgetList(detail.list.id);
+                  router.replace("/");
+                }}
+                className="press h-10 rounded-full px-3 text-[15px] font-medium text-text-2"
+              >
+                Tirar da tela inicial
+              </button>
+              <DeleteListButton token={key} title={detail.list.title} />
             </div>
           </>
         ) : (
@@ -280,27 +263,14 @@ export function ListView() {
         )}
       </main>
 
-      {detail && !readOnly && (
+      {detail && (
         <Composer onAdd={add} onTyping={presence.setTyping} status={<TypingIndicator typers={presence.typers} />} />
-      )}
-      {detail && readOnly && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <TypingIndicator typers={presence.typers} floating />
-        </div>
       )}
     </>
   );
 }
 
-function TopBar({
-  offline,
-  title,
-  back = { href: "/", label: "Grupos" },
-}: {
-  offline?: boolean;
-  title?: string;
-  back?: { href: string; label: string };
-}) {
+function TopBar({ offline, title }: { offline?: boolean; title?: string }) {
   async function share() {
     const url = location.href;
     if (navigator.share) {
@@ -313,9 +283,9 @@ function TopBar({
   return (
     <header className="sticky top-0 z-20 bg-bg/85 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
       <div className="mx-auto flex h-12 max-w-lg items-center px-2">
-        <Link href={back.href} className="press -ml-1 flex h-10 min-w-0 items-center pr-3 pl-1 font-medium">
+        <Link href="/" className="press -ml-1 flex h-10 items-center pr-3 pl-1 font-medium">
           <ChevronLeft />
-          <span className="truncate">{back.label}</span>
+          Listas
         </Link>
         <AnimatePresence>
           {offline && (
@@ -340,17 +310,7 @@ function TopBar({
   );
 }
 
-function Title({
-  listId,
-  title,
-  token,
-  readOnly,
-}: {
-  listId: string;
-  title: string;
-  token: string;
-  readOnly: boolean;
-}) {
+function Title({ token, title }: { token: string; title: string }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title);
   const cls = "text-[2.125rem] leading-[1.1] font-bold tracking-[-0.02em]";
@@ -360,14 +320,13 @@ function Title({
     const clean = value.trim();
     if (!clean || clean === title) return setValue(title);
     try {
-      await api(`/lists/${listId}`, { method: "PATCH", body: { title: clean }, token });
+      await api("/list", { method: "PATCH", body: { title: clean }, token });
     } catch {
       setValue(title);
       toast("Não deu para renomear a lista.");
     }
   }
 
-  if (readOnly) return <h1 className={`${cls} mt-1 px-1 text-balance`}>{title}</h1>;
   if (editing) {
     return (
       <input
@@ -397,7 +356,7 @@ function Title({
   );
 }
 
-function DeleteListButton({ listId, title, token }: { listId: string; title: string; token: string }) {
+function DeleteListButton({ token, title }: { token: string; title: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -405,9 +364,9 @@ function DeleteListButton({ listId, title, token }: { listId: string; title: str
   async function del() {
     setDeleting(true);
     try {
-      await api(`/lists/${listId}`, { method: "DELETE", token });
-      summaryCache.delete(listId);
-      router.replace(groupUrl(token));
+      await api("/list", { method: "DELETE", token });
+      dropToken(token);
+      router.replace("/");
     } catch {
       setDeleting(false);
       setOpen(false);
@@ -424,7 +383,7 @@ function DeleteListButton({ listId, title, token }: { listId: string; title: str
         open={open}
         onOpenChange={setOpen}
         title={`Apagar "${title}"?`}
-        description="Some para todo mundo do grupo. Não dá para desfazer."
+        description="Some para todo mundo que tem o link. Não dá para desfazer."
       >
         <button
           onClick={del}

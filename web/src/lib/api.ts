@@ -4,18 +4,8 @@ export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:808
 
 export type User = { id: string; username: string | null; avatar_url: string | null };
 
-export type Role = "edit" | "read";
-
-export type GroupInfo = { id: string; name: string; role: Role; list_count: number };
-
-/** Both links of a group; only editors get these. */
-export type GroupLinks = { group: GroupInfo; edit_token: string; read_token: string };
-
-export type GroupDetail = { group: GroupInfo; lists: ListSummary[]; read_token: string | null };
-
 export type ListSummary = {
   id: string;
-  group_id: string;
   title: string;
   created_by: string | null;
   item_count: number;
@@ -34,10 +24,10 @@ export type Item = {
   done_at: string | null;
 };
 
-export type ListDetail = { list: ListSummary; items: Item[]; role: Role };
+export type ListDetail = { list: ListSummary; items: Item[] };
 
-/** Summaries seen on the home screen, so a list's title paints before its items arrive. */
-export const summaryCache = new Map<string, ListSummary>();
+/** A list with the secret link token that opens it. */
+export type LinkedList = { token: string; list: ListSummary };
 
 export type RealtimeEvent =
   | { type: "list_upserted"; list: ListSummary }
@@ -45,8 +35,6 @@ export type RealtimeEvent =
   | { type: "item_upserted"; item: Item }
   | { type: "item_deleted"; id: string }
   | PresenceEvent
-  | { type: "group_renamed"; id: string; name: string }
-  | { type: "revoked" }
   | { type: "resync" };
 
 type AuthResponse = { access_token: string; user: User };
@@ -146,7 +134,7 @@ export async function setUsername(username: string) {
 
 // ---------- requests ----------
 
-/** `token` is the group's secret link token; every list and item route needs it. */
+/** `token` is a list's link token, which every list and item route needs. */
 type RequestOptions = { method?: string; body?: unknown; token?: string };
 
 export async function api<T>(path: string, { method = "GET", body, token }: RequestOptions = {}): Promise<T> {
@@ -156,7 +144,7 @@ export async function api<T>(path: string, { method = "GET", body, token }: Requ
       headers: {
         ...(body !== undefined && { "Content-Type": "application/json" }),
         ...(accessToken && { Authorization: `Bearer ${accessToken}` }),
-        ...(token && { "X-Group-Token": token }),
+        ...(token && { "X-List-Token": token }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

@@ -22,17 +22,12 @@ use uuid::Uuid;
 use crate::{
     AppState,
     error::AppResult,
-    groups,
     lists::{self, Item, ListSummary},
     presence::{self, Peer},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Topic {
-    /// A group's screen: summaries of its lists.
-    Group(Uuid),
-    List(Uuid),
-}
+/// Every socket watches one list; its room is keyed by the list id.
+pub type Topic = Uuid;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -42,14 +37,9 @@ pub enum Event<'a> {
     ItemUpserted { item: &'a Item },
     ItemDeleted { id: Uuid },
     Presence { count: usize, peers: &'a [Peer] },
-    GroupRenamed { id: Uuid, name: &'a str },
     /// The client fell behind and missed events; it should refetch.
     Resync,
 }
-
-/// Sent when a group's link is rotated; the server then closes the socket. Kept as a literal
-/// so `serve` can recognise it without parsing.
-const REVOKED: &str = r#"{"type":"revoked"}"#;
 
 #[derive(Default)]
 pub struct Hub {
@@ -59,29 +49,9 @@ pub struct Hub {
 
 impl Hub {
     pub fn publish(&self, topic: Topic, event: &Event) {
-        self.send(topic, serde_json::to_string(event).unwrap().into());
-    }
-
-    fn send(&self, topic: Topic, text: Arc<str>) {
         let topics = self.topics.lock().unwrap();
         if let Some(tx) = topics.get(&topic) {
-            let _ = tx.send(text);
-        }
-    }
-
-    /// Publishes a list summary to its group and to the list's own room.
-    pub fn list_changed(&self, list: &ListSummary) {
-        let event = Event::ListUpserted { list };
-        self.publish(Topic::Group(list.group_id), &event);
-        self.publish(Topic::List(list.id), &event);
-    }
-
-    /// Disconnects everyone watching the group or any of its lists.
-    pub fn revoke(&self, group_id: Uuid, list_ids: &[Uuid]) {
-        let text: Arc<str> = REVOKED.into();
-        self.send(Topic::Group(group_id), text.clone());
-        for &id in list_ids {
-            self.send(Topic::List(id), text.clone());
+            let _ = tx.send(serde_json::to_string(event).unwrap().into());
         }
     }
 
@@ -105,9 +75,8 @@ impl Hub {
 
 #[derive(Deserialize)]
 pub struct WsQuery {
-    /// The group's edit or read-only token. Browsers can't set headers on a WebSocket.
-    group: String,
-    list: Option<Uuid>,
+    /// The list's link token.
+    list: String,
 }
 
 pub async fn ws_handler(
@@ -115,14 +84,7 @@ pub async fn ws_handler(
     Query(q): Query<WsQuery>,
     State(state): State<AppState>,
 ) -> AppResult<Response> {
-    let access = groups::resolve(&state, &q.group).await?;
-    let topic = match q.list {
-        Some(id) => {
-            lists::ensure_in_group(&state, id, access.group_id).await?;
-            Topic::List(id)
-        }
-        None => Topic::Group(access.group_id),
-    };
+    let topic = lists::resolve(&state, &q.list).await?;
     Ok(ws
         .max_message_size(4 * 1024)
         .on_upgrade(move |socket| serve(socket, topic, state)))
@@ -132,9 +94,7 @@ async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
     let (mut tx, mut rx_socket) = socket.split();
     let mut rx = state.hub.subscribe(topic);
     let mut presence = presence::Session::join(&state.hub, topic);
-    if let Some(p) = &presence
-        && tx.send(Message::Text(p.welcome().into())).await.is_err()
-    {
+    if tx.send(Message::Text(presence.welcome().into())).await.is_err() {
         return;
     }
 
@@ -149,25 +109,17 @@ async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                if tx.send(Message::Text(text.as_ref().into())).await.is_err() || &*text == REVOKED {
+                if tx.send(Message::Text(text.as_ref().into())).await.is_err() {
                     break;
                 }
             }
             incoming = rx_socket.next() => match incoming {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(Message::Text(text))) => {
-                    if let Some(p) = &mut presence {
-                        p.handle(&state.jwt.1, text.as_str());
-                    }
-                }
+                Some(Ok(Message::Text(text))) => presence.handle(&state.jwt.1, text.as_str()),
                 // Anything else (e.g. a keep-alive) is ignored.
                 Some(Ok(_)) => {}
             },
-            _ = presence::sleep_until(presence.as_ref().and_then(|p| p.typing_until())) => {
-                if let Some(p) = &mut presence {
-                    p.expire_typing();
-                }
-            }
+            _ = presence::sleep_until(presence.typing_until()) => presence.expire_typing(),
             _ = ping.tick() => {
                 if tx.send(Message::Ping(Default::default())).await.is_err() {
                     break;

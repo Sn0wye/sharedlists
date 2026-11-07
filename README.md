@@ -1,9 +1,9 @@
 # Listas
 
-Shared checklists in real time. Lists live in groups, and a group is reached by a secret link: whoever has the link sees and edits its lists, with no account. Logging in with Google or GitHub is optional. It adds your username to what you add and tick, and syncs your groups between devices.
+Shared checklists in real time. Each list is reached by a secret link: whoever has the link sees and edits it, with no account. Logging in with Google or GitHub is optional. It adds your username to what you add and tick, and syncs your lists between devices.
 
 - `web/`: Next.js 16 static export (`output: "export"`), Tailwind 4, installable PWA. No server needed; `pnpm build` writes `web/out/`.
-- `api/`: Rust (axum + sqlx/Postgres). REST for writes, WebSockets (`/ws?group=<token>`, `/ws?group=<token>&list=<id>`) for live updates.
+- `api/`: Rust (axum + sqlx/Postgres). REST for writes, a WebSocket (`/ws?list=<token>`) for live updates.
 
 Live presence on a list (who is here, who is typing, which item each person is on) travels only over the list socket and lives in memory; see `api/src/presence.rs` for the messages. Logged-in people show their username, verified from the access token. Everyone else gets an anonymous animal name and a colour kept in `localStorage` (`sl_presence`).
 
@@ -16,12 +16,11 @@ cd web && cp .env.example .env.local && pnpm install && pnpm dev
 
 To run the API outside Docker: `cp api/.env.example api/.env`, then `cd api && cargo run` (only the postgres service from compose is needed).
 
-## Groups
+## Links
 
-- A group link is `WEB_URL/g/?t=<token>`. The token is 128 random bits. Each group has an edit link and a read-only link. The read-only token is derived from the edit token (`SHA-256("listas-read:" + edit)`), so whoever has the edit link can also share the read-only one. The database stores only SHA-256 hashes of both.
-- Every list and item route takes the token in the `X-Group-Token` header. A missing token returns 400, an unknown one 404, and a read-only token on a write 403. Lists are only visible inside their group; there is no global listing.
-- `POST /group/rotate` replaces both links. Old tokens stop working at once, and open WebSockets on them receive `{"type":"revoked"}` and are closed.
-- The home screen shows the groups this device has opened, stored in `localStorage` (`listas:groups`). For logged-in users, `user_groups` keeps a copy of each link so other devices can open it. That copy has to be readable, so it is stored as plain text. Copies that a rotation invalidated are deleted the next time they are read.
+- A list link is `WEB_URL/list/?t=<token>`. The token is 128 random bits; the database stores only its SHA-256.
+- Every list and item route takes the token in the `X-List-Token` header. A missing token returns 400, an unknown one 404. There is no global listing.
+- The home screen shows the lists this device has opened, stored in `localStorage` (`listas:lists`), and refreshes them with `POST /lists/resolve`. For logged-in users, `user_lists` keeps a copy of each link so other devices show it too. That copy has to be readable, so it is stored as plain text.
 
 ## Auth
 

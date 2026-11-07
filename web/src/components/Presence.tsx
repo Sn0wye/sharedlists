@@ -104,11 +104,8 @@ export function PresenceStack({ people, self }: { people: Peer[]; self: Peer | n
   );
 }
 
-/**
- * "Ana está digitando…": a line inside the composer bar, or a floating pill when there is no
- * composer (read-only links).
- */
-export function TypingIndicator({ typers, floating = false }: { typers: Peer[]; floating?: boolean }) {
+/** "Ana está digitando…", shown inside the composer bar. */
+export function TypingIndicator({ typers }: { typers: Peer[] }) {
   const text =
     typers.length > 2
       ? `${typers.length} pessoas estão digitando…`
@@ -119,13 +116,13 @@ export function TypingIndicator({ typers, floating = false }: { typers: Peer[]; 
         <motion.div
           key="typing"
           role="status"
-          initial={floating ? { opacity: 0, transform: "translateY(6px)" } : { height: 0, opacity: 0 }}
-          animate={floating ? { opacity: 1, transform: "translateY(0px)" } : { height: "auto", opacity: 1 }}
-          exit={floating ? { opacity: 0, transform: "translateY(6px)" } : { height: 0, opacity: 0 }}
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: "auto", opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
           transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
-          className={floating ? "max-w-full rounded-full bg-surface/90 shadow-[0_2px_12px_rgb(0_0_0/0.08),0_0_0_0.5px_var(--sep-strong)] backdrop-blur-xl" : "overflow-hidden"}
+          className="overflow-hidden"
         >
-          <div className={`flex items-center gap-1.5 text-[13px] text-text-2 ${floating ? "px-3 py-1.5" : "px-4 pb-1.5"}`}>
+          <div className="flex items-center gap-1.5 px-4 pb-1.5 text-[13px] text-text-2">
             <span className="flex">
               {typers.slice(0, 3).map((p, i) => (
                 <span

@@ -27,15 +27,26 @@ CREATE TABLE sessions (
 
 CREATE INDEX sessions_prev_hash ON sessions (prev_hash);
 
+-- A list is reached by a secret link. Only the SHA-256 of its token is stored, like refresh tokens.
 CREATE TABLE lists (
     id          UUID PRIMARY KEY,
     title       TEXT NOT NULL,
+    token_hash  BYTEA NOT NULL UNIQUE,
     created_by  UUID REFERENCES users (id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX lists_updated_at ON lists (updated_at DESC);
+-- Lists a logged-in user has opened, so they show up on all of the user's devices.
+-- The token is the user's own copy of the link. It has to be readable to rebuild the link
+-- on another device, so unlike `lists.token_hash` it can't be a hash.
+CREATE TABLE user_lists (
+    user_id   UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    list_id   UUID NOT NULL REFERENCES lists (id) ON DELETE CASCADE,
+    token     TEXT NOT NULL,
+    added_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, list_id)
+);
 
 -- Names are denormalized: a username is chosen once and never changes.
 CREATE TABLE items (

@@ -1,40 +1,51 @@
+//! Lists reached by a secret link, no login needed.
+//!
+//! Each list has one token (128 random bits); only its SHA-256 is stored. Every list and item
+//! route takes it in the `X-List-Token` header, the WebSocket as `?list=`. An unknown token
+//! gets a 404, so a wrong link can't tell whether a list exists. There is no global listing:
+//! a device only knows the lists whose links it has opened.
+
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::{get, patch, post},
+    extract::{FromRequestParts, Path, State},
+    http::{StatusCode, request::Parts},
+    routing::{delete, get, patch, post},
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::MaybeUser,
+    auth::{AuthUser, MaybeUser},
     error::{AppError, AppResult},
-    groups::{Access, Role},
-    realtime::{Event, Topic},
+    realtime::Event,
 };
 
+pub const TOKEN_HEADER: &str = "x-list-token";
 const MAX_TITLE: usize = 100;
 const MAX_ITEM: usize = 500;
+/// Tokens are 22 characters; anything much longer is not one of ours.
+const MAX_TOKEN: usize = 64;
+const MAX_RESOLVE: usize = 200;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/lists", post(create_list))
-        .route(
-            "/lists/{id}",
-            get(get_list).patch(rename_list).delete(delete_list),
-        )
-        .route("/lists/{id}/items", post(create_item))
-        .route("/lists/{id}/clear-done", post(clear_done))
+        .route("/lists/resolve", post(resolve_lists))
+        .route("/list", get(get_list).patch(rename_list).delete(delete_list))
+        .route("/list/items", post(create_item))
+        .route("/list/clear-done", post(clear_done))
         .route("/items/{id}", patch(update_item).delete(delete_item))
+        .route("/me/lists", get(my_lists).post(save_list))
+        .route("/me/lists/{id}", delete(forget_list))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct ListSummary {
     pub id: Uuid,
-    pub group_id: Uuid,
     title: String,
     created_by: Option<Uuid>,
     item_count: i64,
@@ -57,11 +68,22 @@ pub struct Item {
     done_at: Option<OffsetDateTime>,
 }
 
+/// A list together with the link token that reaches it.
+#[derive(Serialize, sqlx::FromRow)]
+struct Linked {
+    token: String,
+    #[sqlx(flatten)]
+    list: ListSummary,
+}
+
 /// Expands to a static summary query with `$tail` appended (sqlx rejects runtime-built SQL).
 macro_rules! summary_sql {
     ($tail:literal) => {
+        summary_sql!("", $tail)
+    };
+    ($extra:literal, $tail:literal) => {
         concat!(
-            "SELECT l.id, l.group_id, l.title, l.created_by, l.updated_at,
+            "SELECT ", $extra, "l.id, l.title, l.created_by, l.updated_at,
                     count(i.id) AS item_count,
                     count(i.id) FILTER (WHERE i.done) AS done_count
              FROM lists l LEFT JOIN items i ON i.list_id = l.id ",
@@ -70,44 +92,23 @@ macro_rules! summary_sql {
     };
 }
 
-/// A list's summary, or 404 if it isn't in `group_id`.
-async fn summary(state: &AppState, id: Uuid, group_id: Uuid) -> AppResult<ListSummary> {
+async fn summary(state: &AppState, id: Uuid) -> AppResult<ListSummary> {
     Ok(
-        sqlx::query_as(summary_sql!("WHERE l.id = $1 AND l.group_id = $2 GROUP BY l.id"))
+        sqlx::query_as(summary_sql!("WHERE l.id = $1 GROUP BY l.id"))
             .bind(id)
-            .bind(group_id)
             .fetch_one(&state.db)
             .await?,
     )
 }
 
-pub async fn in_group(state: &AppState, group_id: Uuid) -> AppResult<Vec<ListSummary>> {
-    Ok(sqlx::query_as(summary_sql!(
-        "WHERE l.group_id = $1 GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 200"
-    ))
-    .bind(group_id)
-    .fetch_all(&state.db)
-    .await?)
-}
-
-/// 404 unless the list belongs to the group.
-pub async fn ensure_in_group(state: &AppState, id: Uuid, group_id: Uuid) -> AppResult<()> {
-    sqlx::query_scalar::<_, i32>("SELECT 1 FROM lists WHERE id = $1 AND group_id = $2")
-        .bind(id)
-        .bind(group_id)
-        .fetch_optional(&state.db)
-        .await?
-        .map(|_| ())
-        .ok_or(AppError::NotFound)
-}
-
-/// Bumps the list's activity time and pushes its new counts to every subscriber.
-async fn touch(state: &AppState, list_id: Uuid, group_id: Uuid) -> AppResult<()> {
+/// Bumps the list's activity time and pushes its new counts to the list's room.
+async fn touch(state: &AppState, list_id: Uuid) -> AppResult<()> {
     sqlx::query("UPDATE lists SET updated_at = now() WHERE id = $1")
         .bind(list_id)
         .execute(&state.db)
         .await?;
-    state.hub.list_changed(&summary(state, list_id, group_id).await?);
+    let list = summary(state, list_id).await?;
+    state.hub.publish(list_id, &Event::ListUpserted { list: &list });
     Ok(())
 }
 
@@ -125,8 +126,52 @@ fn clean(text: &str, max: usize) -> AppResult<String> {
 fn unique_violation(e: sqlx::Error) -> AppError {
     match e {
         sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict("id exists"),
-        sqlx::Error::Database(db) if db.is_foreign_key_violation() => AppError::NotFound,
         e => e.into(),
+    }
+}
+
+// ---------- tokens & access ----------
+
+/// 128 random bits.
+fn new_token() -> String {
+    URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>())
+}
+
+fn hash(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
+}
+
+/// The id of the list `token` opens.
+pub async fn resolve(state: &AppState, token: &str) -> AppResult<Uuid> {
+    if token.is_empty() || token.len() > MAX_TOKEN {
+        return Err(AppError::NotFound);
+    }
+    sqlx::query_scalar("SELECT id FROM lists WHERE token_hash = $1")
+        .bind(hash(token))
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+/// Proof that the request carries the link token of list `id`.
+pub struct Access {
+    pub id: Uuid,
+    token: String,
+}
+
+impl FromRequestParts<AppState> for Access {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> AppResult<Self> {
+        let token = parts
+            .headers
+            .get(TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::BadRequest("missing list token"))?;
+        Ok(Self {
+            id: resolve(state, token).await?,
+            token: token.to_owned(),
+        })
     }
 }
 
@@ -134,56 +179,72 @@ fn unique_violation(e: sqlx::Error) -> AppError {
 
 #[derive(Deserialize)]
 struct CreateList {
-    /// Client-generated so the UI can navigate and render optimistically before the response.
-    id: Option<Uuid>,
     title: String,
 }
 
 async fn create_list(
     State(state): State<AppState>,
-    access: Access,
     user: MaybeUser,
     Json(body): Json<CreateList>,
-) -> AppResult<(StatusCode, Json<ListSummary>)> {
-    let group_id = access.editable()?;
-    let id = body.id.unwrap_or_else(Uuid::new_v4);
-    sqlx::query("INSERT INTO lists (id, group_id, title, created_by) VALUES ($1, $2, $3, $4)")
+) -> AppResult<(StatusCode, Json<Linked>)> {
+    let id = Uuid::new_v4();
+    let token = new_token();
+    sqlx::query("INSERT INTO lists (id, title, created_by, token_hash) VALUES ($1, $2, $3, $4)")
         .bind(id)
-        .bind(group_id)
         .bind(clean(&body.title, MAX_TITLE)?)
         .bind(user.id())
+        .bind(hash(&token))
         .execute(&state.db)
-        .await
-        .map_err(unique_violation)?;
+        .await?;
+    let list = summary(&state, id).await?;
+    Ok((StatusCode::CREATED, Json(Linked { token, list })))
+}
 
-    let list = summary(&state, id, group_id).await?;
-    state
-        .hub
-        .publish(Topic::Group(group_id), &Event::ListUpserted { list: &list });
-    Ok((StatusCode::CREATED, Json(list)))
+#[derive(Deserialize)]
+struct ResolveBody {
+    tokens: Vec<String>,
+}
+
+/// Looks up the lists saved on a device in one round trip. Tokens whose list is gone are
+/// left out, which tells the client to forget them.
+async fn resolve_lists(
+    State(state): State<AppState>,
+    Json(body): Json<ResolveBody>,
+) -> AppResult<Json<Vec<Linked>>> {
+    if body.tokens.len() > MAX_RESOLVE {
+        return Err(AppError::BadRequest("too many tokens"));
+    }
+    let tokens: Vec<String> = body
+        .tokens
+        .into_iter()
+        .filter(|t| !t.is_empty() && t.len() <= MAX_TOKEN)
+        .collect();
+    let rows = sqlx::query_as(summary_sql!(
+        "t.token, ",
+        "JOIN (SELECT token, sha256(convert_to(token, 'UTF8')) AS hash
+               FROM unnest($1::text[]) AS token) t ON t.hash = l.token_hash
+         GROUP BY l.id, t.token"
+    ))
+    .bind(&tokens)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows))
 }
 
 #[derive(Serialize)]
 struct ListDetail {
     list: ListSummary,
     items: Vec<Item>,
-    role: Role,
 }
 
-async fn get_list(
-    State(state): State<AppState>,
-    access: Access,
-    Path(id): Path<Uuid>,
-) -> AppResult<Json<ListDetail>> {
-    let list = summary(&state, id, access.group_id).await?;
+async fn get_list(State(state): State<AppState>, list: Access) -> AppResult<Json<ListDetail>> {
     let items = sqlx::query_as("SELECT * FROM items WHERE list_id = $1 ORDER BY created_at")
-        .bind(id)
+        .bind(list.id)
         .fetch_all(&state.db)
         .await?;
     Ok(Json(ListDetail {
-        list,
+        list: summary(&state, list.id).await?,
         items,
-        role: access.role,
     }))
 }
 
@@ -194,43 +255,26 @@ struct RenameList {
 
 async fn rename_list(
     State(state): State<AppState>,
-    access: Access,
-    Path(id): Path<Uuid>,
+    list: Access,
     Json(body): Json<RenameList>,
 ) -> AppResult<Json<ListSummary>> {
-    let group_id = access.editable()?;
-    sqlx::query(
-        "UPDATE lists SET title = $2, updated_at = now() WHERE id = $1 AND group_id = $3 RETURNING id",
-    )
-    .bind(id)
-    .bind(clean(&body.title, MAX_TITLE)?)
-    .bind(group_id)
-    .fetch_one(&state.db)
-    .await?;
-    let list = summary(&state, id, group_id).await?;
-    state.hub.list_changed(&list);
-    Ok(Json(list))
+    sqlx::query("UPDATE lists SET title = $2, updated_at = now() WHERE id = $1")
+        .bind(list.id)
+        .bind(clean(&body.title, MAX_TITLE)?)
+        .execute(&state.db)
+        .await?;
+    let summary = summary(&state, list.id).await?;
+    state.hub.publish(list.id, &Event::ListUpserted { list: &summary });
+    Ok(Json(summary))
 }
 
-/// Anyone with the edit link can delete; the client asks for confirmation first.
-async fn delete_list(
-    State(state): State<AppState>,
-    access: Access,
-    Path(id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    let group_id = access.editable()?;
-    let deleted = sqlx::query("DELETE FROM lists WHERE id = $1 AND group_id = $2")
-        .bind(id)
-        .bind(group_id)
+/// Anyone with the link can delete, like everything else; the client asks for confirmation first.
+async fn delete_list(State(state): State<AppState>, list: Access) -> AppResult<StatusCode> {
+    sqlx::query("DELETE FROM lists WHERE id = $1")
+        .bind(list.id)
         .execute(&state.db)
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(AppError::NotFound);
-    }
-    let event = Event::ListDeleted { id };
-    state.hub.publish(Topic::Group(group_id), &event);
-    state.hub.publish(Topic::List(id), &event);
+        .await?;
+    state.hub.publish(list.id, &Event::ListDeleted { id: list.id });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -244,28 +288,23 @@ struct CreateItem {
 
 async fn create_item(
     State(state): State<AppState>,
-    access: Access,
     user: MaybeUser,
-    Path(list_id): Path<Uuid>,
+    list: Access,
     Json(body): Json<CreateItem>,
 ) -> AppResult<(StatusCode, Json<Item>)> {
-    let group_id = access.editable()?;
     let item: Item = sqlx::query_as(
-        "INSERT INTO items (id, list_id, text, created_by_name)
-         SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM lists WHERE id = $2 AND group_id = $5)
-         RETURNING *",
+        "INSERT INTO items (id, list_id, text, created_by_name) VALUES ($1, $2, $3, $4) RETURNING *",
     )
     .bind(body.id.unwrap_or_else(Uuid::new_v4))
-    .bind(list_id)
+    .bind(list.id)
     .bind(clean(&body.text, MAX_ITEM)?)
     .bind(user.name())
-    .bind(group_id)
     .fetch_one(&state.db)
     .await
     .map_err(unique_violation)?;
 
-    state.hub.publish(Topic::List(list_id), &Event::ItemUpserted { item: &item });
-    touch(&state, list_id, group_id).await?;
+    state.hub.publish(list.id, &Event::ItemUpserted { item: &item });
+    touch(&state, list.id).await?;
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -277,70 +316,109 @@ struct UpdateItem {
 
 async fn update_item(
     State(state): State<AppState>,
-    access: Access,
     user: MaybeUser,
+    list: Access,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateItem>,
 ) -> AppResult<Json<Item>> {
-    let group_id = access.editable()?;
     let text = body.text.as_deref().map(|t| clean(t, MAX_ITEM)).transpose()?;
     let item: Item = sqlx::query_as(
         "UPDATE items SET
-            text = COALESCE($2, text),
-            done = COALESCE($3::boolean, done),
-            done_at = CASE WHEN $3::boolean IS NULL THEN done_at WHEN $3 THEN now() END,
-            done_by_name = CASE WHEN $3::boolean IS NULL THEN done_by_name WHEN $3 THEN $4 END
-         WHERE id = $1 AND list_id IN (SELECT id FROM lists WHERE group_id = $5)
+            text = COALESCE($3, text),
+            done = COALESCE($4::boolean, done),
+            done_at = CASE WHEN $4::boolean IS NULL THEN done_at WHEN $4 THEN now() END,
+            done_by_name = CASE WHEN $4::boolean IS NULL THEN done_by_name WHEN $4 THEN $5 END
+         WHERE id = $1 AND list_id = $2
          RETURNING *",
     )
     .bind(id)
+    .bind(list.id)
     .bind(text)
     .bind(body.done)
     .bind(user.name())
-    .bind(group_id)
     .fetch_one(&state.db)
     .await?;
 
-    state.hub.publish(Topic::List(item.list_id), &Event::ItemUpserted { item: &item });
-    touch(&state, item.list_id, group_id).await?;
+    state.hub.publish(list.id, &Event::ItemUpserted { item: &item });
+    touch(&state, list.id).await?;
     Ok(Json(item))
 }
 
 async fn delete_item(
     State(state): State<AppState>,
-    access: Access,
+    list: Access,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let group_id = access.editable()?;
-    let list_id: Uuid = sqlx::query_scalar(
-        "DELETE FROM items
-         WHERE id = $1 AND list_id IN (SELECT id FROM lists WHERE group_id = $2)
-         RETURNING list_id",
-    )
-    .bind(id)
-    .bind(group_id)
-    .fetch_one(&state.db)
-    .await?;
-    state.hub.publish(Topic::List(list_id), &Event::ItemDeleted { id });
-    touch(&state, list_id, group_id).await?;
+    sqlx::query_scalar::<_, Uuid>("DELETE FROM items WHERE id = $1 AND list_id = $2 RETURNING id")
+        .bind(id)
+        .bind(list.id)
+        .fetch_one(&state.db)
+        .await?;
+    state.hub.publish(list.id, &Event::ItemDeleted { id });
+    touch(&state, list.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn clear_done(
-    State(state): State<AppState>,
-    access: Access,
-    Path(list_id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    let group_id = access.editable()?;
-    ensure_in_group(&state, list_id, group_id).await?;
+async fn clear_done(State(state): State<AppState>, list: Access) -> AppResult<StatusCode> {
     let ids: Vec<Uuid> =
         sqlx::query_scalar("DELETE FROM items WHERE list_id = $1 AND done RETURNING id")
-            .bind(list_id)
+            .bind(list.id)
             .fetch_all(&state.db)
             .await?;
     for id in ids {
-        state.hub.publish(Topic::List(list_id), &Event::ItemDeleted { id });
+        state.hub.publish(list.id, &Event::ItemDeleted { id });
     }
-    touch(&state, list_id, group_id).await?;
+    touch(&state, list.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- a logged-in user's lists ----------
+
+async fn my_lists(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+) -> AppResult<Json<Vec<Linked>>> {
+    let rows = sqlx::query_as(summary_sql!(
+        "ul.token, ",
+        "JOIN user_lists ul ON ul.list_id = l.id
+         WHERE ul.user_id = $1
+         GROUP BY l.id, ul.token, ul.added_at
+         ORDER BY ul.added_at DESC"
+    ))
+    .bind(claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows))
+}
+
+/// Saves the link of a list to the user's account so their other devices show it too.
+async fn save_list(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    list: Access,
+) -> AppResult<StatusCode> {
+    sqlx::query(
+        "INSERT INTO user_lists (user_id, list_id, token) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, list_id) DO NOTHING",
+    )
+    .bind(claims.sub)
+    .bind(list.id)
+    .bind(&list.token)
+    .execute(&state.db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes the list from the user's account. The list itself stays.
+async fn forget_list(
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    sqlx::query("DELETE FROM user_lists WHERE user_id = $1 AND list_id = $2")
+        .bind(claims.sub)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -86,22 +86,20 @@ pub struct Session {
 }
 
 impl Session {
-    /// Only list rooms have presence; group screens get `None`.
-    pub fn join(hub: &Arc<Hub>, topic: Topic) -> Option<Self> {
-        let Topic::List(_) = topic else { return None };
+    pub fn join(hub: &Arc<Hub>, topic: Topic) -> Self {
         let id = Uuid::new_v4();
         hub.presence.update(hub, topic, |peers| {
             peers.push(Peer { id, ..Default::default() });
             true
         });
-        Some(Self {
+        Self {
             hub: hub.clone(),
             topic,
             id,
             typing_until: None,
             allowance: BURST,
             last_message: Instant::now(),
-        })
+        }
     }
 
     /// Tells the client which peer in the snapshots is itself.
