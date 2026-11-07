@@ -283,6 +283,11 @@ export function ListView() {
       {detail && !readOnly && (
         <Composer onAdd={add} onTyping={presence.setTyping} status={<TypingIndicator typers={presence.typers} />} />
       )}
+      {detail && readOnly && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <TypingIndicator typers={presence.typers} floating />
+        </div>
+      )}
     </>
   );
 }
