@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod groups;
 mod lists;
+mod presence;
 mod realtime;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};

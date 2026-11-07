@@ -1,8 +1,9 @@
 "use client";
 
-import { animate, motion, useMotionValue, useTransform, type PanInfo } from "motion/react";
+import { animate, AnimatePresence, motion, useMotionValue, useTransform, type PanInfo } from "motion/react";
 import { useRef } from "react";
 import type { Item } from "@/lib/api";
+import { peerColor, peerName, type Peer } from "@/lib/presence";
 import { Trash, X } from "./icons";
 
 const SPRING = { type: "spring", duration: 0.45, bounce: 0 } as const;
@@ -14,9 +15,13 @@ type Props = {
   onDelete: (item: Item) => void;
   /** Opened through a read-only link: no ticking, swiping or deleting. */
   readOnly?: boolean;
+  /** Other people on this item right now; the first one's colour marks the row. */
+  here?: Peer[];
+  /** The user touched or focused this row. */
+  onActive?: () => void;
 };
 
-export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
+export function ItemRow({ item, onToggle, onDelete, readOnly, here = [], onActive }: Props) {
   const x = useMotionValue(0);
   const row = useRef<HTMLDivElement>(null);
   // Red backdrop and trash come into focus as the row slides away.
@@ -34,6 +39,8 @@ export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
   }
 
   const byline = item.done ? item.done_by_name && `por ${item.done_by_name}` : item.created_by_name;
+  const lead = here[0];
+  const hereLabel = here.length > 0 ? `${here.map(peerName).join(", ")} ${here.length === 1 ? "está" : "estão"} aqui` : undefined;
 
   return (
     <motion.li
@@ -42,6 +49,8 @@ export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
       animate={{ opacity: 1, transform: "translateY(0px)" }}
       exit={{ opacity: 0, height: 0 }}
       transition={{ layout: SPRING, opacity: { duration: 0.18 }, transform: { duration: 0.2, ease: [0.23, 1, 0.32, 1] }, height: { duration: 0.22 } }}
+      onPointerDownCapture={onActive}
+      onFocus={onActive}
       className="group relative overflow-hidden border-b border-sep last:border-b-0"
     >
       <motion.div
@@ -63,8 +72,25 @@ export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
         dragMomentum={false}
         onDragEnd={onDragEnd}
         style={{ x }}
+        title={hereLabel}
         className="relative flex items-stretch bg-surface"
       >
+        <AnimatePresence>
+          {lead && (
+            <motion.span
+              key="here"
+              aria-hidden
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+              style={{ "--peer": peerColor(lead) } as React.CSSProperties}
+              className="pointer-events-none absolute inset-0 bg-[color-mix(in_srgb,var(--peer)_7%,transparent)]"
+            >
+              <span className="absolute inset-y-2.5 left-0 w-[3px] rounded-r-full bg-(--peer)" />
+            </motion.span>
+          )}
+        </AnimatePresence>
         <motion.button
           role="checkbox"
           aria-checked={item.done}
@@ -73,7 +99,7 @@ export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
           onTap={readOnly ? undefined : () => onToggle(item)}
           whileTap={readOnly ? undefined : { scale: 0.985 }}
           transition={{ duration: 0.12 }}
-          className="flex min-h-14 min-w-0 flex-1 items-start gap-3.5 py-3.5 pl-4 pr-3 text-left"
+          className="relative flex min-h-14 min-w-0 flex-1 items-start gap-3.5 py-3.5 pl-4 pr-3 text-left"
         >
           <span
             data-done={item.done}
@@ -90,13 +116,14 @@ export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
               {item.text}
             </span>
             {byline && <span className="mt-0.5 block text-[13px] text-text-2">{byline}</span>}
+            {hereLabel && <span className="sr-only">{hereLabel}</span>}
           </span>
         </motion.button>
         {!readOnly && (
           <button
             onClick={() => onDelete(item)}
             aria-label={`Remover ${item.text}`}
-            className="row-delete grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
+            className="row-delete relative grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
           >
             <X />
           </button>

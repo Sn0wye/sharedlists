@@ -5,6 +5,8 @@ Shared checklists in real time. Lists live in groups, and a group is reached by 
 - `web/`: Next.js 16 static export (`output: "export"`), Tailwind 4, installable PWA. No server needed; `pnpm build` writes `web/out/`.
 - `api/`: Rust (axum + sqlx/Postgres). REST for writes, WebSockets (`/ws?group=<token>`, `/ws?group=<token>&list=<id>`) for live updates.
 
+Live presence on a list (who is here, who is typing, which item each person is on) travels only over the list socket and lives in memory; see `api/src/presence.rs` for the messages. Logged-in people show their username, verified from the access token. Everyone else gets an anonymous animal name and a colour kept in `localStorage` (`sl_presence`).
+
 ## Local
 
 ```sh

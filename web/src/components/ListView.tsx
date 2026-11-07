@@ -8,10 +8,12 @@ import { Sheet } from "./Sheet";
 import { api, ApiError, summaryCache, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
 import { findGroupByToken, groupStore, groupUrl } from "@/lib/groups";
 import { useAuth, useRealtime } from "@/lib/hooks";
+import { usePresence } from "@/lib/presence";
 import { toast } from "@/lib/toast";
 import { Composer } from "./Composer";
 import { ChevronLeft, Share } from "./icons";
 import { ItemRow } from "./ItemRow";
+import { PresenceStack, TypingIndicator } from "./Presence";
 import { ProgressRing } from "./ProgressRing";
 
 /** A toggled item holds its place this long so the check and strike land before it moves. */
@@ -45,8 +47,9 @@ export function ListView() {
     () => undefined,
   );
   const [missing, setMissing] = useState(false);
-  const [presence, setPresence] = useState(1);
   const [settling, setSettling] = useState<ReadonlySet<string>>(new Set());
+  const presence = usePresence();
+  const { receive } = presence;
 
   const load = useCallback(() => {
     if (!id || !token) return;
@@ -76,7 +79,8 @@ export function ListView() {
         case "list_upserted":
           return setDetail((d) => d && { ...d, list: e.list });
         case "presence":
-          return setPresence(e.count);
+        case "presence_self":
+          return receive(e);
         case "list_deleted":
           toast("Essa lista foi apagada.");
           return router.replace(token ? groupUrl(token) : "/");
@@ -84,10 +88,10 @@ export function ListView() {
           return load();
       }
     },
-    [router, token, load],
+    [router, token, load, receive],
   );
   // A dead link would otherwise keep retrying the socket forever.
-  const connection = useRealtime(missing ? null : token, id, onEvent, load);
+  const connection = useRealtime(missing ? null : token, id, onEvent, load, presence.link);
 
   function settle(itemId: string) {
     setSettling((s) => new Set(s).add(itemId));
@@ -226,12 +230,7 @@ export function ListView() {
               {readOnly && (
                 <span className="rounded-full bg-surface px-2.5 py-1 text-[13px] font-medium text-text">Só leitura</span>
               )}
-              {presence > 1 && (
-                <span className="ml-auto flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-[13px] font-medium text-text">
-                  <span className="size-1.5 rounded-full bg-done" aria-hidden />
-                  {presence} online
-                </span>
-              )}
+              <PresenceStack people={presence.people} self={presence.self} />
             </div>
 
             {loaded && items.length === 0 ? (
@@ -240,7 +239,15 @@ export function ListView() {
               <motion.ul layout className="mt-5 overflow-hidden rounded-2xl bg-surface">
                 <AnimatePresence initial={false}>
                   {items.map((item) => (
-                    <ItemRow key={item.id} item={item} onToggle={toggle} onDelete={del} readOnly={readOnly} />
+                    <ItemRow
+                      key={item.id}
+                      item={item}
+                      onToggle={toggle}
+                      onDelete={del}
+                      readOnly={readOnly}
+                      here={presence.at(item.id)}
+                      onActive={readOnly ? undefined : () => presence.touch(item.id)}
+                    />
                   ))}
                 </AnimatePresence>
               </motion.ul>
@@ -273,7 +280,9 @@ export function ListView() {
         )}
       </main>
 
-      {detail && !readOnly && <Composer onAdd={add} />}
+      {detail && !readOnly && (
+        <Composer onAdd={add} onTyping={presence.setTyping} status={<TypingIndicator typers={presence.typers} />} />
+      )}
     </>
   );
 }

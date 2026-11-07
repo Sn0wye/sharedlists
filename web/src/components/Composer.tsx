@@ -1,11 +1,19 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ArrowUp } from "./icons";
 
+type Props = {
+  onAdd: (text: string) => void;
+  /** Called on every change with whether the field holds text, and with `false` on send or blur. */
+  onTyping?: (active: boolean) => void;
+  /** A line shown above the field, inside the bar (who else is typing). */
+  status?: ReactNode;
+};
+
 /** Fixed bottom bar for adding items. Keeps the keyboard open so several items can be typed in a row. */
-export function Composer({ onAdd }: { onAdd: (text: string) => void }) {
+export function Composer({ onAdd, onTyping, status }: Props) {
   const [text, setText] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const ready = text.trim().length > 0;
@@ -15,6 +23,7 @@ export function Composer({ onAdd }: { onAdd: (text: string) => void }) {
     if (!ready) return;
     onAdd(text.trim());
     setText("");
+    onTyping?.(false);
     input.current?.focus();
   }
 
@@ -23,11 +32,16 @@ export function Composer({ onAdd }: { onAdd: (text: string) => void }) {
       onSubmit={submit}
       className="fixed inset-x-0 bottom-0 z-20 bg-bg/85 px-4 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl"
     >
+      <div className="mx-auto max-w-lg">{status}</div>
       <div className="mx-auto flex max-w-lg items-center gap-2">
         <input
           ref={input}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            onTyping?.(e.target.value.trim().length > 0);
+          }}
+          onBlur={() => onTyping?.(false)}
           maxLength={500}
           placeholder="Novo item"
           aria-label="Novo item"

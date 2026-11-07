@@ -24,6 +24,7 @@ use crate::{
     error::AppResult,
     groups,
     lists::{self, Item, ListSummary},
+    presence::{self, Peer},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,7 +41,7 @@ pub enum Event<'a> {
     ListDeleted { id: Uuid },
     ItemUpserted { item: &'a Item },
     ItemDeleted { id: Uuid },
-    Presence { count: usize },
+    Presence { count: usize, peers: &'a [Peer] },
     GroupRenamed { id: Uuid, name: &'a str },
     /// The client fell behind and missed events; it should refetch.
     Resync,
@@ -53,6 +54,7 @@ const REVOKED: &str = r#"{"type":"revoked"}"#;
 #[derive(Default)]
 pub struct Hub {
     topics: Mutex<HashMap<Topic, broadcast::Sender<Arc<str>>>>,
+    pub presence: presence::Rooms,
 }
 
 impl Hub {
@@ -83,24 +85,21 @@ impl Hub {
         }
     }
 
-    fn subscribe(&self, topic: Topic) -> (broadcast::Receiver<Arc<str>>, usize) {
+    fn subscribe(&self, topic: Topic) -> broadcast::Receiver<Arc<str>> {
         let mut topics = self.topics.lock().unwrap();
-        let tx = topics
+        topics
             .entry(topic)
-            .or_insert_with(|| broadcast::channel(256).0);
-        let rx = tx.subscribe();
-        (rx, tx.receiver_count())
+            .or_insert_with(|| broadcast::channel(256).0)
+            .subscribe()
     }
 
-    /// Returns the remaining subscriber count, dropping the topic once nobody listens.
-    fn unsubscribe(&self, topic: Topic, rx: broadcast::Receiver<Arc<str>>) -> usize {
+    /// Drops the topic once nobody listens.
+    fn unsubscribe(&self, topic: Topic, rx: broadcast::Receiver<Arc<str>>) {
         drop(rx);
         let mut topics = self.topics.lock().unwrap();
-        let count = topics.get(&topic).map_or(0, |tx| tx.receiver_count());
-        if count == 0 {
+        if topics.get(&topic).is_some_and(|tx| tx.receiver_count() == 0) {
             topics.remove(&topic);
         }
-        count
     }
 }
 
@@ -131,9 +130,12 @@ pub async fn ws_handler(
 
 async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
     let (mut tx, mut rx_socket) = socket.split();
-    let (mut rx, count) = state.hub.subscribe(topic);
-    if let Topic::List(_) = topic {
-        state.hub.publish(topic, &Event::Presence { count });
+    let mut rx = state.hub.subscribe(topic);
+    let mut presence = presence::Session::join(&state.hub, topic);
+    if let Some(p) = &presence
+        && tx.send(Message::Text(p.welcome().into())).await.is_err()
+    {
+        return;
     }
 
     let mut ping = tokio::time::interval(Duration::from_secs(25));
@@ -153,9 +155,19 @@ async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
             }
             incoming = rx_socket.next() => match incoming {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                // Clients may send anything (e.g. a keep-alive); we ignore it.
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(p) = &mut presence {
+                        p.handle(&state.jwt.1, text.as_str());
+                    }
+                }
+                // Anything else (e.g. a keep-alive) is ignored.
                 Some(Ok(_)) => {}
             },
+            _ = presence::sleep_until(presence.as_ref().and_then(|p| p.typing_until())) => {
+                if let Some(p) = &mut presence {
+                    p.expire_typing();
+                }
+            }
             _ = ping.tick() => {
                 if tx.send(Message::Ping(Default::default())).await.is_err() {
                     break;
@@ -164,8 +176,6 @@ async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
         }
     }
 
-    let remaining = state.hub.unsubscribe(topic, rx);
-    if let (Topic::List(_), 1..) = (topic, remaining) {
-        state.hub.publish(topic, &Event::Presence { count: remaining });
-    }
+    drop(presence);
+    state.hub.unsubscribe(topic, rx);
 }

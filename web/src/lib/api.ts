@@ -1,3 +1,5 @@
+import type { PresenceEvent } from "./presence";
+
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").replace(/\/$/, "");
 
 export type User = { id: string; username: string | null; avatar_url: string | null };
@@ -42,7 +44,7 @@ export type RealtimeEvent =
   | { type: "list_deleted"; id: string }
   | { type: "item_upserted"; item: Item }
   | { type: "item_deleted"; id: string }
-  | { type: "presence"; count: number }
+  | PresenceEvent
   | { type: "group_renamed"; id: string; name: string }
   | { type: "revoked" }
   | { type: "resync" };
@@ -74,6 +76,9 @@ function setState(next: AuthState) {
   state = next;
   listeners.forEach((l) => l());
 }
+
+/** For the presence `hello`, which proves the username over the socket. */
+export const getAccessToken = () => accessToken;
 
 export const authStore = {
   subscribe(listener: () => void) {
