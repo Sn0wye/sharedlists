@@ -11,7 +11,7 @@ import { keepPins, setPinned, usePinned } from "@/lib/pins";
 import { listUrl, rememberList, savedStore, syncLists, type SavedList } from "@/lib/saved";
 import { toast } from "@/lib/toast";
 import { AccountButton } from "./AccountButton";
-import { Pin, Plus, Search, X } from "./icons";
+import { Coffee, Pin, Plus, Search, X } from "./icons";
 import { ProgressRing } from "./ProgressRing";
 import { Sheet, sheetInput, sheetPrimary } from "./Sheet";
 import { SyncStatus } from "./SyncStatus";
@@ -105,6 +105,7 @@ export function HomeView() {
             )}
           </>
         )}
+        {hydrated && <Tip />}
       </main>
 
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center pb-[max(1.25rem,env(safe-area-inset-bottom))]">
@@ -356,6 +357,22 @@ function ListRow({ list, pinned, hit, showPin }: RowProps) {
         </button>
       </motion.div>
     </motion.li>
+  );
+}
+
+function Tip() {
+  return (
+    <p className="pt-10 text-center">
+      <a
+        href="https://ko-fi.com/trzimajewski"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex min-h-11 items-center gap-1.5 px-3 text-[13px] text-text-2 transition-colors hover:text-text"
+      >
+        <Coffee className="size-3.5" />
+        Gostou? Me pague um café
+      </a>
+    </p>
   );
 }
 
