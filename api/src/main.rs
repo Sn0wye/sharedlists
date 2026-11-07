@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod groups;
 mod lists;
 mod realtime;
 
@@ -100,12 +101,17 @@ async fn main() {
                 .collect::<Vec<_>>(),
         )
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static(groups::TOKEN_HEADER),
+        ])
         .allow_credentials(true)
         .max_age(Duration::from_secs(86400));
 
     let app = Router::new()
         .merge(lists::router())
+        .merge(groups::router())
         .merge(auth::router())
         .layer(GovernorLayer::new(governor))
         .route("/ws", get(realtime::ws_handler))

@@ -12,6 +12,7 @@ use crate::{
     AppState,
     auth::MaybeUser,
     error::{AppError, AppResult},
+    groups::{Access, Role},
     realtime::{Event, Topic},
 };
 
@@ -20,7 +21,7 @@ const MAX_ITEM: usize = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/lists", get(all_lists).post(create_list))
+        .route("/lists", post(create_list))
         .route(
             "/lists/{id}",
             get(get_list).patch(rename_list).delete(delete_list),
@@ -33,6 +34,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize, sqlx::FromRow)]
 pub struct ListSummary {
     pub id: Uuid,
+    pub group_id: Uuid,
     title: String,
     created_by: Option<Uuid>,
     item_count: i64,
@@ -59,7 +61,7 @@ pub struct Item {
 macro_rules! summary_sql {
     ($tail:literal) => {
         concat!(
-            "SELECT l.id, l.title, l.created_by, l.updated_at,
+            "SELECT l.id, l.group_id, l.title, l.created_by, l.updated_at,
                     count(i.id) AS item_count,
                     count(i.id) FILTER (WHERE i.done) AS done_count
              FROM lists l LEFT JOIN items i ON i.list_id = l.id ",
@@ -68,22 +70,44 @@ macro_rules! summary_sql {
     };
 }
 
-async fn summary(state: &AppState, id: Uuid) -> AppResult<ListSummary> {
+/// A list's summary, or 404 if it isn't in `group_id`.
+async fn summary(state: &AppState, id: Uuid, group_id: Uuid) -> AppResult<ListSummary> {
     Ok(
-        sqlx::query_as(summary_sql!("WHERE l.id = $1 GROUP BY l.id"))
+        sqlx::query_as(summary_sql!("WHERE l.id = $1 AND l.group_id = $2 GROUP BY l.id"))
             .bind(id)
+            .bind(group_id)
             .fetch_one(&state.db)
             .await?,
     )
 }
 
+pub async fn in_group(state: &AppState, group_id: Uuid) -> AppResult<Vec<ListSummary>> {
+    Ok(sqlx::query_as(summary_sql!(
+        "WHERE l.group_id = $1 GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 200"
+    ))
+    .bind(group_id)
+    .fetch_all(&state.db)
+    .await?)
+}
+
+/// 404 unless the list belongs to the group.
+pub async fn ensure_in_group(state: &AppState, id: Uuid, group_id: Uuid) -> AppResult<()> {
+    sqlx::query_scalar::<_, i32>("SELECT 1 FROM lists WHERE id = $1 AND group_id = $2")
+        .bind(id)
+        .bind(group_id)
+        .fetch_optional(&state.db)
+        .await?
+        .map(|_| ())
+        .ok_or(AppError::NotFound)
+}
+
 /// Bumps the list's activity time and pushes its new counts to every subscriber.
-async fn touch(state: &AppState, list_id: Uuid) -> AppResult<()> {
+async fn touch(state: &AppState, list_id: Uuid, group_id: Uuid) -> AppResult<()> {
     sqlx::query("UPDATE lists SET updated_at = now() WHERE id = $1")
         .bind(list_id)
         .execute(&state.db)
         .await?;
-    state.hub.list_changed(&summary(state, list_id).await?);
+    state.hub.list_changed(&summary(state, list_id, group_id).await?);
     Ok(())
 }
 
@@ -108,15 +132,6 @@ fn unique_violation(e: sqlx::Error) -> AppError {
 
 // ---------- lists ----------
 
-async fn all_lists(State(state): State<AppState>) -> AppResult<Json<Vec<ListSummary>>> {
-    let lists = sqlx::query_as(summary_sql!(
-        "GROUP BY l.id ORDER BY l.updated_at DESC LIMIT 200"
-    ))
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(lists))
-}
-
 #[derive(Deserialize)]
 struct CreateList {
     /// Client-generated so the UI can navigate and render optimistically before the response.
@@ -126,20 +141,25 @@ struct CreateList {
 
 async fn create_list(
     State(state): State<AppState>,
+    access: Access,
     user: MaybeUser,
     Json(body): Json<CreateList>,
 ) -> AppResult<(StatusCode, Json<ListSummary>)> {
+    let group_id = access.editable()?;
     let id = body.id.unwrap_or_else(Uuid::new_v4);
-    sqlx::query("INSERT INTO lists (id, title, created_by) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO lists (id, group_id, title, created_by) VALUES ($1, $2, $3, $4)")
         .bind(id)
+        .bind(group_id)
         .bind(clean(&body.title, MAX_TITLE)?)
         .bind(user.id())
         .execute(&state.db)
         .await
         .map_err(unique_violation)?;
 
-    let list = summary(&state, id).await?;
-    state.hub.publish(Topic::Lobby, &Event::ListUpserted { list: &list });
+    let list = summary(&state, id, group_id).await?;
+    state
+        .hub
+        .publish(Topic::Group(group_id), &Event::ListUpserted { list: &list });
     Ok((StatusCode::CREATED, Json(list)))
 }
 
@@ -147,15 +167,24 @@ async fn create_list(
 struct ListDetail {
     list: ListSummary,
     items: Vec<Item>,
+    role: Role,
 }
 
-async fn get_list(State(state): State<AppState>, Path(id): Path<Uuid>) -> AppResult<Json<ListDetail>> {
-    let list = summary(&state, id).await?;
+async fn get_list(
+    State(state): State<AppState>,
+    access: Access,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ListDetail>> {
+    let list = summary(&state, id, access.group_id).await?;
     let items = sqlx::query_as("SELECT * FROM items WHERE list_id = $1 ORDER BY created_at")
         .bind(id)
         .fetch_all(&state.db)
         .await?;
-    Ok(Json(ListDetail { list, items }))
+    Ok(Json(ListDetail {
+        list,
+        items,
+        role: access.role,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -165,23 +194,34 @@ struct RenameList {
 
 async fn rename_list(
     State(state): State<AppState>,
+    access: Access,
     Path(id): Path<Uuid>,
     Json(body): Json<RenameList>,
 ) -> AppResult<Json<ListSummary>> {
-    sqlx::query("UPDATE lists SET title = $2, updated_at = now() WHERE id = $1 RETURNING id")
-        .bind(id)
-        .bind(clean(&body.title, MAX_TITLE)?)
-        .fetch_one(&state.db)
-        .await?;
-    let list = summary(&state, id).await?;
+    let group_id = access.editable()?;
+    sqlx::query(
+        "UPDATE lists SET title = $2, updated_at = now() WHERE id = $1 AND group_id = $3 RETURNING id",
+    )
+    .bind(id)
+    .bind(clean(&body.title, MAX_TITLE)?)
+    .bind(group_id)
+    .fetch_one(&state.db)
+    .await?;
+    let list = summary(&state, id, group_id).await?;
     state.hub.list_changed(&list);
     Ok(Json(list))
 }
 
-/// Anyone can delete, like everything else; the client asks for confirmation first.
-async fn delete_list(State(state): State<AppState>, Path(id): Path<Uuid>) -> AppResult<StatusCode> {
-    let deleted = sqlx::query("DELETE FROM lists WHERE id = $1")
+/// Anyone with the edit link can delete; the client asks for confirmation first.
+async fn delete_list(
+    State(state): State<AppState>,
+    access: Access,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let group_id = access.editable()?;
+    let deleted = sqlx::query("DELETE FROM lists WHERE id = $1 AND group_id = $2")
         .bind(id)
+        .bind(group_id)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -189,7 +229,7 @@ async fn delete_list(State(state): State<AppState>, Path(id): Path<Uuid>) -> App
         return Err(AppError::NotFound);
     }
     let event = Event::ListDeleted { id };
-    state.hub.publish(Topic::Lobby, &event);
+    state.hub.publish(Topic::Group(group_id), &event);
     state.hub.publish(Topic::List(id), &event);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -204,23 +244,28 @@ struct CreateItem {
 
 async fn create_item(
     State(state): State<AppState>,
+    access: Access,
     user: MaybeUser,
     Path(list_id): Path<Uuid>,
     Json(body): Json<CreateItem>,
 ) -> AppResult<(StatusCode, Json<Item>)> {
+    let group_id = access.editable()?;
     let item: Item = sqlx::query_as(
-        "INSERT INTO items (id, list_id, text, created_by_name) VALUES ($1, $2, $3, $4) RETURNING *",
+        "INSERT INTO items (id, list_id, text, created_by_name)
+         SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM lists WHERE id = $2 AND group_id = $5)
+         RETURNING *",
     )
     .bind(body.id.unwrap_or_else(Uuid::new_v4))
     .bind(list_id)
     .bind(clean(&body.text, MAX_ITEM)?)
     .bind(user.name())
+    .bind(group_id)
     .fetch_one(&state.db)
     .await
     .map_err(unique_violation)?;
 
     state.hub.publish(Topic::List(list_id), &Event::ItemUpserted { item: &item });
-    touch(&state, list_id).await?;
+    touch(&state, list_id, group_id).await?;
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -232,10 +277,12 @@ struct UpdateItem {
 
 async fn update_item(
     State(state): State<AppState>,
+    access: Access,
     user: MaybeUser,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateItem>,
 ) -> AppResult<Json<Item>> {
+    let group_id = access.editable()?;
     let text = body.text.as_deref().map(|t| clean(t, MAX_ITEM)).transpose()?;
     let item: Item = sqlx::query_as(
         "UPDATE items SET
@@ -243,32 +290,49 @@ async fn update_item(
             done = COALESCE($3::boolean, done),
             done_at = CASE WHEN $3::boolean IS NULL THEN done_at WHEN $3 THEN now() END,
             done_by_name = CASE WHEN $3::boolean IS NULL THEN done_by_name WHEN $3 THEN $4 END
-         WHERE id = $1
+         WHERE id = $1 AND list_id IN (SELECT id FROM lists WHERE group_id = $5)
          RETURNING *",
     )
     .bind(id)
     .bind(text)
     .bind(body.done)
     .bind(user.name())
+    .bind(group_id)
     .fetch_one(&state.db)
     .await?;
 
     state.hub.publish(Topic::List(item.list_id), &Event::ItemUpserted { item: &item });
-    touch(&state, item.list_id).await?;
+    touch(&state, item.list_id, group_id).await?;
     Ok(Json(item))
 }
 
-async fn delete_item(State(state): State<AppState>, Path(id): Path<Uuid>) -> AppResult<StatusCode> {
-    let list_id: Uuid = sqlx::query_scalar("DELETE FROM items WHERE id = $1 RETURNING list_id")
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+async fn delete_item(
+    State(state): State<AppState>,
+    access: Access,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let group_id = access.editable()?;
+    let list_id: Uuid = sqlx::query_scalar(
+        "DELETE FROM items
+         WHERE id = $1 AND list_id IN (SELECT id FROM lists WHERE group_id = $2)
+         RETURNING list_id",
+    )
+    .bind(id)
+    .bind(group_id)
+    .fetch_one(&state.db)
+    .await?;
     state.hub.publish(Topic::List(list_id), &Event::ItemDeleted { id });
-    touch(&state, list_id).await?;
+    touch(&state, list_id, group_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn clear_done(State(state): State<AppState>, Path(list_id): Path<Uuid>) -> AppResult<StatusCode> {
+async fn clear_done(
+    State(state): State<AppState>,
+    access: Access,
+    Path(list_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let group_id = access.editable()?;
+    ensure_in_group(&state, list_id, group_id).await?;
     let ids: Vec<Uuid> =
         sqlx::query_scalar("DELETE FROM items WHERE list_id = $1 AND done RETURNING id")
             .bind(list_id)
@@ -277,6 +341,6 @@ async fn clear_done(State(state): State<AppState>, Path(list_id): Path<Uuid>) ->
     for id in ids {
         state.hub.publish(Topic::List(list_id), &Event::ItemDeleted { id });
     }
-    touch(&state, list_id).await?;
+    touch(&state, list_id, group_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

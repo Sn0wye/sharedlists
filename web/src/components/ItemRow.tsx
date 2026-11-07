@@ -8,9 +8,15 @@ import { Trash, X } from "./icons";
 const SPRING = { type: "spring", duration: 0.45, bounce: 0 } as const;
 const REVEAL = 88;
 
-type Props = { item: Item; onToggle: (item: Item) => void; onDelete: (item: Item) => void };
+type Props = {
+  item: Item;
+  onToggle: (item: Item) => void;
+  onDelete: (item: Item) => void;
+  /** Opened through a read-only link: no ticking, swiping or deleting. */
+  readOnly?: boolean;
+};
 
-export function ItemRow({ item, onToggle, onDelete }: Props) {
+export function ItemRow({ item, onToggle, onDelete, readOnly }: Props) {
   const x = useMotionValue(0);
   const row = useRef<HTMLDivElement>(null);
   // Red backdrop and trash come into focus as the row slides away.
@@ -50,7 +56,7 @@ export function ItemRow({ item, onToggle, onDelete }: Props) {
 
       <motion.div
         ref={row}
-        drag="x"
+        drag={readOnly ? false : "x"}
         dragDirectionLock
         dragConstraints={{ left: -REVEAL, right: 0 }}
         dragElastic={{ left: 0.12, right: 0 }}
@@ -62,8 +68,10 @@ export function ItemRow({ item, onToggle, onDelete }: Props) {
         <motion.button
           role="checkbox"
           aria-checked={item.done}
-          onTap={() => onToggle(item)}
-          whileTap={{ scale: 0.985 }}
+          aria-readonly={readOnly}
+          disabled={readOnly}
+          onTap={readOnly ? undefined : () => onToggle(item)}
+          whileTap={readOnly ? undefined : { scale: 0.985 }}
           transition={{ duration: 0.12 }}
           className="flex min-h-14 min-w-0 flex-1 items-start gap-3.5 py-3.5 pl-4 pr-3 text-left"
         >
@@ -84,13 +92,15 @@ export function ItemRow({ item, onToggle, onDelete }: Props) {
             {byline && <span className="mt-0.5 block text-[13px] text-text-2">{byline}</span>}
           </span>
         </motion.button>
-        <button
-          onClick={() => onDelete(item)}
-          aria-label={`Remover ${item.text}`}
-          className="row-delete grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
-        >
-          <X />
-        </button>
+        {!readOnly && (
+          <button
+            onClick={() => onDelete(item)}
+            aria-label={`Remover ${item.text}`}
+            className="row-delete grid w-11 shrink-0 place-items-center text-text-2 hover:text-danger focus-visible:text-danger"
+          >
+            <X />
+          </button>
+        )}
       </motion.div>
     </motion.li>
   );

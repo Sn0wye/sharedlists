@@ -10,11 +10,12 @@ export function useAuth() {
 export type Connection = "connecting" | "open" | "offline";
 
 /**
- * Subscribes to live events for one list (or the home screen when `listId` is null).
+ * Subscribes to live events for one list, or for the group's screen when `listId` is null.
  * Reconnects with backoff; `onResync` fires after a reconnect so the caller can refetch
  * whatever it missed while disconnected.
  */
 export function useRealtime(
+  token: string | null,
   listId: string | null,
   onEvent: (e: RealtimeEvent) => void,
   onResync: () => void,
@@ -26,11 +27,13 @@ export function useRealtime(
   });
 
   useEffect(() => {
+    if (!token) return;
     let socket: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
     let closed = false;
-    const url = `${API_URL.replace(/^http/, "ws")}/ws${listId ? `?list=${listId}` : ""}`;
+    const query = new URLSearchParams({ group: token, ...(listId && { list: listId }) });
+    const url = `${API_URL.replace(/^http/, "ws")}/ws?${query}`;
 
     const connect = () => {
       socket = new WebSocket(url);
@@ -72,7 +75,7 @@ export function useRealtime(
       document.removeEventListener("visibilitychange", onVisible);
       socket?.close();
     };
-  }, [listId]);
+  }, [token, listId]);
 
   return connection;
 }

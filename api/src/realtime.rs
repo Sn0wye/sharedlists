@@ -21,13 +21,15 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    lists::{Item, ListSummary},
+    error::AppResult,
+    groups,
+    lists::{self, Item, ListSummary},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Topic {
-    /// Home screen: every list's summary.
-    Lobby,
+    /// A group's screen: summaries of its lists.
+    Group(Uuid),
     List(Uuid),
 }
 
@@ -39,9 +41,14 @@ pub enum Event<'a> {
     ItemUpserted { item: &'a Item },
     ItemDeleted { id: Uuid },
     Presence { count: usize },
+    GroupRenamed { id: Uuid, name: &'a str },
     /// The client fell behind and missed events; it should refetch.
     Resync,
 }
+
+/// Sent when a group's link is rotated; the server then closes the socket. Kept as a literal
+/// so `serve` can recognise it without parsing.
+const REVOKED: &str = r#"{"type":"revoked"}"#;
 
 #[derive(Default)]
 pub struct Hub {
@@ -50,17 +57,30 @@ pub struct Hub {
 
 impl Hub {
     pub fn publish(&self, topic: Topic, event: &Event) {
+        self.send(topic, serde_json::to_string(event).unwrap().into());
+    }
+
+    fn send(&self, topic: Topic, text: Arc<str>) {
         let topics = self.topics.lock().unwrap();
         if let Some(tx) = topics.get(&topic) {
-            let _ = tx.send(serde_json::to_string(event).unwrap().into());
+            let _ = tx.send(text);
         }
     }
 
-    /// Publishes a list summary to the lobby and to the list's own room.
+    /// Publishes a list summary to its group and to the list's own room.
     pub fn list_changed(&self, list: &ListSummary) {
         let event = Event::ListUpserted { list };
-        self.publish(Topic::Lobby, &event);
+        self.publish(Topic::Group(list.group_id), &event);
         self.publish(Topic::List(list.id), &event);
+    }
+
+    /// Disconnects everyone watching the group or any of its lists.
+    pub fn revoke(&self, group_id: Uuid, list_ids: &[Uuid]) {
+        let text: Arc<str> = REVOKED.into();
+        self.send(Topic::Group(group_id), text.clone());
+        for &id in list_ids {
+            self.send(Topic::List(id), text.clone());
+        }
     }
 
     fn subscribe(&self, topic: Topic) -> (broadcast::Receiver<Arc<str>>, usize) {
@@ -86,6 +106,8 @@ impl Hub {
 
 #[derive(Deserialize)]
 pub struct WsQuery {
+    /// The group's edit or read-only token. Browsers can't set headers on a WebSocket.
+    group: String,
     list: Option<Uuid>,
 }
 
@@ -93,10 +115,18 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<WsQuery>,
     State(state): State<AppState>,
-) -> Response {
-    let topic = q.list.map_or(Topic::Lobby, Topic::List);
-    ws.max_message_size(4 * 1024)
-        .on_upgrade(move |socket| serve(socket, topic, state))
+) -> AppResult<Response> {
+    let access = groups::resolve(&state, &q.group).await?;
+    let topic = match q.list {
+        Some(id) => {
+            lists::ensure_in_group(&state, id, access.group_id).await?;
+            Topic::List(id)
+        }
+        None => Topic::Group(access.group_id),
+    };
+    Ok(ws
+        .max_message_size(4 * 1024)
+        .on_upgrade(move |socket| serve(socket, topic, state)))
 }
 
 async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
@@ -117,7 +147,7 @@ async fn serve(socket: WebSocket, topic: Topic, state: AppState) {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                if tx.send(Message::Text(text.as_ref().into())).await.is_err() {
+                if tx.send(Message::Text(text.as_ref().into())).await.is_err() || &*text == REVOKED {
                     break;
                 }
             }
