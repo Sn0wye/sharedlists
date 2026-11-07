@@ -318,7 +318,8 @@ function ListRow({ list, pinned, hit, showPin }: RowProps) {
                 </span>
               )}
             </span>
-            {showPin && pinned && <Pin className="size-3.5 text-text-2" filled />}
+            {/* Desktop hover shows the pin button instead; one pin per row. */}
+            {showPin && pinned && <Pin className="size-3.5 text-text-2 pointer-fine:group-hover:hidden" filled />}
             <span className="text-[15px] text-text-2 tabular-nums">{total === 0 ? "" : `${done}/${total}`}</span>
           </Link>
         </motion.div>
