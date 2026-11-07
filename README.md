@@ -36,7 +36,7 @@ OAuth callback URLs to register:
 
 ## Offline
 
-Everything inside a list works without a connection. Each change goes into an outbox in IndexedDB (`web/src/lib/offline.ts`) and is sent in order when the API is reachable again: on the `online` event, when the app comes back to the foreground, after any request that succeeds, and with backoff up to a minute. The last copy of each list opened on the device is kept too, so the app opens and searches offline.
+Everything inside a list works without a connection. Each change goes into an outbox in IndexedDB (`web/src/lib/offline.ts`) and is sent in order when the API is reachable again: on the `online` event, when the app comes back to the foreground, when a list loads, and with backoff up to 30 seconds. The last copy of each list opened on the device is kept too, so the app opens and searches offline.
 
 | Feature | Offline | How |
 |---|---|---|

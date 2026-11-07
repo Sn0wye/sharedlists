@@ -51,10 +51,10 @@ export function FollowButton({ listId, token }: { listId: string; token: string 
       onClick={onClick}
       aria-pressed={state.following}
       aria-label={state.following ? "Desativar notificações desta lista" : "Ativar notificações desta lista"}
-      className="press grid size-10 place-items-center disabled:opacity-60"
+      className="press grid size-11 place-items-center disabled:opacity-60"
       disabled={busy}
     >
-      <Bell filled={state.following} className="size-[22px]" />
+      <Bell filled={state.following} />
     </button>
   );
 }

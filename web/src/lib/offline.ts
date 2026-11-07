@@ -281,14 +281,22 @@ async function send(batch: Op[]): Promise<Outcome> {
 }
 
 let flushing = false;
+/** Grows only when the retry timer fires, so a burst of offline taps doesn't push the next try out. */
 let attempt = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+const retryLater = () => {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => {
+    attempt++;
+    void flush();
+  }, Math.min(1000 * 2 ** attempt, 30_000));
+};
 
 export async function flush() {
   if (flushing || !started) return;
   clearTimeout(retryTimer);
   if (!state.ops.length) return;
-  if (!navigator.onLine) return set({ stalled: true });
+  if (!navigator.onLine) return set({ stalled: true }); // the `online` event flushes
   flushing = true;
   try {
     // One tab sends at a time; the others would only race it and reorder ops.
@@ -322,9 +330,7 @@ async function drain() {
       single = false;
       if (outcome === "retry") {
         set({ stalled: true });
-        attempt++;
-        retryTimer = setTimeout(flush, Math.min(1000 * 2 ** attempt, 60_000));
-        return;
+        return retryLater();
       }
       attempt = 0;
       if (outcome !== "ok") discarded += batch.length;
