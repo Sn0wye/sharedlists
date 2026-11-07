@@ -4,8 +4,9 @@ import { animate, AnimatePresence, LayoutGroup, motion, useMotionValue, useTrans
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { api, type LinkedList, type SearchHit } from "@/lib/api";
+import { api, ApiError, type LinkedList, type SearchHit } from "@/lib/api";
 import { useAuth } from "@/lib/hooks";
+import { searchOffline } from "@/lib/offline";
 import { keepPins, setPinned, usePinned } from "@/lib/pins";
 import { listUrl, rememberList, savedStore, syncLists, type SavedList } from "@/lib/saved";
 import { toast } from "@/lib/toast";
@@ -13,6 +14,7 @@ import { AccountButton } from "./AccountButton";
 import { Pin, Plus, Search, X } from "./icons";
 import { ProgressRing } from "./ProgressRing";
 import { Sheet, sheetInput, sheetPrimary } from "./Sheet";
+import { SyncStatus } from "./SyncStatus";
 
 const byActivity = (a: SavedList, b: SavedList) => b.updated_at.localeCompare(a.updated_at);
 const SPRING = { type: "spring", duration: 0.45, bounce: 0 } as const;
@@ -47,6 +49,17 @@ export function HomeView() {
   const lists = [...saved].sort(byActivity);
   const hits = useItemSearch(query, saved);
 
+  // The "Nova lista" app shortcut (manifest.ts) opens /?nova. Opening a frame later lets the
+  // sheet slide in over the painted screen.
+  useEffect(() => {
+    if (!new URLSearchParams(location.search).has("nova")) return;
+    const frame = requestAnimationFrame(() => {
+      history.replaceState(null, "", "/");
+      setComposing(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
   // Pins of lists this device no longer has (deleted, forgotten) go with them.
   useEffect(() => {
     if (hydrated) keepPins(new Set(saved.map((l) => l.id)));
@@ -71,7 +84,10 @@ export function HomeView() {
     <>
       <header className="mx-auto flex max-w-lg items-end justify-between px-5 pt-[calc(env(safe-area-inset-top)+1.25rem)] pb-4">
         <h1 className="text-[2.125rem] leading-none font-bold tracking-[-0.02em]">Listas</h1>
-        <AccountButton />
+        <div className="flex items-center gap-2">
+          <SyncStatus />
+          <AccountButton />
+        </div>
       </header>
 
       <main className="mx-auto max-w-lg px-4 pb-[calc(7rem+env(safe-area-inset-bottom))]">
@@ -132,6 +148,7 @@ export function HomeView() {
 /**
  * Item matches from the API, debounced. Only the lists saved on this device are searched: the
  * request carries their link tokens. Titles are matched locally since the home already has them.
+ * Without a connection, the copies of opened lists kept on the device are searched instead.
  */
 function useItemSearch(query: string, saved: SavedList[]): ReadonlyMap<string, SearchHit> {
   const [hits, setHits] = useState<{ q: string; map: ReadonlyMap<string, SearchHit> }>({ q: "", map: new Map() });
@@ -141,7 +158,13 @@ function useItemSearch(query: string, saved: SavedList[]): ReadonlyMap<string, S
     if (q.length < 2 || !tokens) return;
     let stale = false;
     const timer = setTimeout(() => {
-      api<SearchHit[]>("/lists/search", { method: "POST", body: { q, tokens: tokens.split(" ") } })
+      const asked = tokens.split(" ");
+      api<SearchHit[]>("/lists/search", { method: "POST", body: { q, tokens: asked } })
+        .catch((e) => {
+          if (e instanceof ApiError) throw e;
+          const lists = savedStore.get().filter((l) => asked.includes(l.token));
+          return searchOffline(q, lists);
+        })
         .then((list) => !stale && setHits({ q, map: new Map(list.map((h) => [h.list_id, h])) }))
         .catch(() => {});
     }, 220);

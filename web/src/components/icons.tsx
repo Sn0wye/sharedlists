@@ -86,3 +86,17 @@ export const Pin = ({ className = "size-6", filled = false }: Props & { filled?:
     <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
   </svg>
 );
+
+export const Bell = ({ className = "size-6", filled = false }: Props & { filled?: boolean }) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} fill={filled ? "currentColor" : "none"}>
+    <path d="M6 9a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9Z" />
+    <path d="M10 19a2 2 0 0 0 4 0" fill="none" />
+  </svg>
+);
+
+export const Clock = ({ className = "size-3.5" }: Props) => (
+  <svg viewBox="0 0 24 24" className={className} {...base} strokeWidth={2.2}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);

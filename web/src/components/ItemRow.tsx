@@ -4,7 +4,7 @@ import { AnimatePresence, animate, motion, Reorder, useDragControls, useMotionVa
 import { useEffect, useRef } from "react";
 import type { Item } from "@/lib/api";
 import { peerColor, peerName, type Peer } from "@/lib/presence";
-import { Grip, Minus, Plus, Trash, X } from "./icons";
+import { Clock, Grip, Minus, Plus, Trash, X } from "./icons";
 
 const SPRING = { type: "spring", duration: 0.45, bounce: 0 } as const;
 const REVEAL = 88;
@@ -14,6 +14,8 @@ type Props = {
   item: Item;
   /** Open items can be dragged by their grip; done ones keep completion order. */
   reorderable: boolean;
+  /** Changed on this device but not saved yet (no connection). */
+  pending?: boolean;
   onToggle: (item: Item) => void;
   onDelete: (item: Item) => void;
   onQuantity: (item: Item, quantity: number) => void;
@@ -26,7 +28,7 @@ type Props = {
   onActive?: () => void;
 };
 
-export function ItemRow({ item, reorderable, onToggle, onDelete, onQuantity, onDrop, onStep, here = [], onActive }: Props) {
+export function ItemRow({ item, reorderable, pending, onToggle, onDelete, onQuantity, onDrop, onStep, here = [], onActive }: Props) {
   const x = useMotionValue(0);
   const row = useRef<HTMLDivElement>(null);
   const grip = useRef<HTMLButtonElement>(null);
@@ -141,6 +143,12 @@ export function ItemRow({ item, reorderable, onToggle, onDelete, onQuantity, onD
             <span data-done={item.done} className="strike break-words">
               {item.text}
             </span>
+            {pending && (
+              <span title="Aguardando conexão" className="ml-1.5 inline-flex align-[-2px] text-text-2">
+                <Clock />
+                <span className="sr-only">Aguardando conexão</span>
+              </span>
+            )}
             {byline && <span className="mt-0.5 block text-[13px] text-text-2">{byline}</span>}
           </span>
         </motion.button>

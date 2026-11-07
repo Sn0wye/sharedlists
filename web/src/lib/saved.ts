@@ -1,4 +1,5 @@
 import { api, ApiError, authStore, type LinkedList, type ListSummary } from "./api";
+import { unfollow } from "./push";
 
 /**
  * Lists this device has opened, kept in localStorage. The link token is the only key to a
@@ -98,6 +99,8 @@ export function dropToken(token: string) {
 /** Removes the list from this device and from the account. The list itself stays. */
 export async function forgetList(id: string) {
   update((all) => all.filter((l) => l.id !== id));
+  // Notifications would open a list this device can no longer find.
+  void unfollow(id).catch(() => {});
   if (userId()) await api(`/me/lists/${id}`, { method: "DELETE" }).catch(() => {});
 }
 

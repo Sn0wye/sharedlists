@@ -21,7 +21,7 @@ use crate::{
     AppState,
     auth::{AuthUser, MaybeUser},
     error::{AppError, AppResult},
-    order_key,
+    order_key, push,
     realtime::Event,
 };
 
@@ -442,10 +442,12 @@ async fn insert_items(
 async fn create_item(
     State(state): State<AppState>,
     user: MaybeUser,
+    device: push::Device,
     list: Access,
     Json(body): Json<NewItem>,
 ) -> AppResult<(StatusCode, Json<Item>)> {
     let item = insert_items(&state, &user, list.id, vec![body]).await?.remove(0);
+    push::items_added(&state, device, list.id, vec![item.text.clone()], user.name());
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -457,10 +459,13 @@ struct CreateItems {
 async fn create_items(
     State(state): State<AppState>,
     user: MaybeUser,
+    device: push::Device,
     list: Access,
     Json(body): Json<CreateItems>,
 ) -> AppResult<(StatusCode, Json<Vec<Item>>)> {
     let items = insert_items(&state, &user, list.id, body.items).await?;
+    let texts = items.iter().map(|i| i.text.clone()).collect();
+    push::items_added(&state, device, list.id, texts, user.name());
     Ok((StatusCode::CREATED, Json(items)))
 }
 

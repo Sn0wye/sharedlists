@@ -6,17 +6,34 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Sheet } from "./Sheet";
-import { api, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
+import { api, ApiError, uuid, type Item, type ListDetail, type RealtimeEvent } from "@/lib/api";
 import { useAuth, useRealtime } from "@/lib/hooks";
 import { usePresence } from "@/lib/presence";
 import { setPinned, usePinned } from "@/lib/pins";
-import { dropToken, findByToken, forgetList, isGone, patchList, rememberList } from "@/lib/saved";
+import {
+  loadList,
+  onDiscard,
+  queueAdd,
+  queueDelete,
+  queueMove,
+  queueQuantity,
+  queueRename,
+  queueRestore,
+  queueToggle,
+  saveList,
+  useOutbox,
+  usePendingItems,
+  withPending,
+} from "@/lib/offline";
+import { dropToken, findByToken, forgetList, isGone, listUrl, patchList, rememberList, savedStore } from "@/lib/saved";
 import { toast } from "@/lib/toast";
 import { Composer } from "./Composer";
+import { FollowButton } from "./FollowButton";
 import { ChevronLeft, Pin, Share } from "./icons";
 import { ItemRow } from "./ItemRow";
 import { PresenceStack, TypingIndicator } from "./Presence";
 import { ProgressRing } from "./ProgressRing";
+import { SyncStatus } from "./SyncStatus";
 
 /** A toggled item holds its place this long so the check and strike land before it moves. */
 const SETTLE_MS = 650;
@@ -44,14 +61,19 @@ function keyBetween(a: string | null, b: string | null): string | null {
 }
 
 export function ListView() {
-  const token = useSearchParams().get("t");
+  const params = useSearchParams();
+  const token = params.get("t");
+  // Notifications link to /list/?id=… (the server never stores tokens); find it on this device.
+  const notifiedId = token ? null : params.get("id");
   const router = useRouter();
   const { user } = useAuth();
   // A list opened before paints its title from the home screen's copy while the items load.
-  const [detail, setDetail] = useState<Detail>(() => {
+  const [detail, setRawDetail] = useState<Detail>(() => {
     const saved = token && findByToken(token);
     return saved ? { list: saved, items: [] } : null;
   });
+  // Every update, from the server or local, keeps this device's unsent changes on top.
+  const setDetail = useCallback((fn: (d: Detail) => Detail) => setRawDetail((d) => withPending(fn(d))), []);
   const [loaded, setLoaded] = useState(false);
   const [missing, setMissing] = useState(false);
   const [settling, setSettling] = useState<ReadonlySet<string>>(new Set());
@@ -61,11 +83,16 @@ export function ListView() {
   const presence = usePresence();
   const { receive } = presence;
 
+  useEffect(() => {
+    const saved = notifiedId && savedStore.get().find((l) => l.id === notifiedId);
+    if (saved) router.replace(listUrl(saved.token));
+  }, [notifiedId, router]);
+
   const load = useCallback(() => {
     if (!token) return;
-    api<ListDetail>("/list", { token })
+    loadList(token)
       .then((d) => {
-        setDetail(d);
+        setDetail(() => d);
         setLoaded(true);
         rememberList({ token, list: d.list });
       })
@@ -74,8 +101,17 @@ export function ListView() {
         setMissing(true);
         dropToken(token);
       });
-  }, [token]);
+  }, [token, setDetail]);
   useEffect(load, [load]);
+  useEffect(() => onDiscard(load), [load]);
+  // Keeps the offline copy current, and the home screen's counts too while changes are pending.
+  useEffect(() => {
+    if (!loaded || !detail || !token) return;
+    saveList(token, detail);
+    patchList({ ...detail.list, item_count: detail.items.length, done_count: detail.items.filter((i) => i.done).length });
+  }, [loaded, detail, token]);
+  const pending = usePendingItems(detail?.list.id ?? null);
+  const { ops } = useOutbox();
 
   const patchItems = (fn: (items: Item[]) => Item[]) => setDetail(withItems(fn));
   const upsert = (item: Item) => setDetail(upserting(item));
@@ -100,7 +136,7 @@ export function ListView() {
           return router.replace("/");
       }
     },
-    [router, token, receive],
+    [router, token, receive, setDetail],
   );
   // A dead link would otherwise keep retrying the socket forever.
   const connection = useRealtime(missing ? null : token, onEvent, load, presence.link);
@@ -131,6 +167,10 @@ export function ListView() {
     : openIds;
   const items = [...order.map((id) => byId.get(id)!), ...done];
 
+  if (notifiedId && !missing) {
+    return <TopBar />;
+  }
+
   if (missing || !token) {
     return (
       <>
@@ -149,7 +189,7 @@ export function ListView() {
   // Narrowed copy for the closures below; `token` itself is string | null.
   const key = token;
 
-  async function add(texts: string[]) {
+  function add(texts: string[]) {
     let last = all.reduce<string | null>((max, i) => (max === null || i.position > max ? i.position : max), null);
     const created: Item[] = texts.map((text) => {
       last = keyBetween(last, null) ?? last;
@@ -166,35 +206,17 @@ export function ListView() {
         done_at: null,
       };
     });
+    queueAdd(key, created);
     created.forEach(upsert);
-    try {
-      if (created.length === 1) {
-        await api("/list/items", { method: "POST", body: { id: created[0].id, text: created[0].text }, token: key });
-      } else {
-        await api("/list/items/batch", {
-          method: "POST",
-          body: { items: created.map(({ id, text }) => ({ id, text })) },
-          token: key,
-        });
-        toast(`${created.length} itens adicionados`);
-      }
-    } catch {
-      created.forEach((i) => remove(i.id));
-      toast(created.length === 1 ? "Não deu para adicionar o item." : "Não deu para adicionar os itens.");
-    }
+    if (created.length > 1) toast(`${created.length} itens adicionados`);
   }
 
-  async function toggle(item: Item) {
+  function toggle(item: Item) {
     const done = !item.done;
     if (done) haptic();
+    queueToggle(key, item, done, user?.username ?? null);
     upsert({ ...item, done, done_at: done ? new Date().toISOString() : null, done_by_name: done ? (user?.username ?? null) : null });
     settle(item.id);
-    try {
-      await api(`/items/${item.id}`, { method: "PATCH", body: { done }, token: key });
-    } catch {
-      upsert(item);
-      toast("Não deu para salvar. Confira sua conexão.");
-    }
   }
 
   function setQuantity(item: Item, quantity: number) {
@@ -203,32 +225,22 @@ export function ListView() {
     clearTimeout(timers.get(item.id));
     timers.set(
       item.id,
-      setTimeout(async () => {
+      setTimeout(() => {
         timers.delete(item.id);
-        try {
-          await api(`/items/${item.id}`, { method: "PATCH", body: { quantity }, token: key });
-        } catch {
-          load();
-          toast("Não deu para salvar. Confira sua conexão.");
-        }
+        queueQuantity(key, item, quantity);
       }, QUANTITY_DEBOUNCE_MS),
     );
   }
 
   /** Puts `item` where it sits in `next` (open item ids), writing only its own position. */
-  async function move(item: Item, next: string[]) {
+  function move(item: Item, next: string[]) {
     setDragOrder(null);
     const at = next.indexOf(item.id);
     const after = next[at - 1] ?? null;
     if (at < 0 || after === (openIds[openIds.indexOf(item.id) - 1] ?? null)) return;
     const position = keyBetween(byId.get(after ?? "")?.position ?? null, byId.get(next[at + 1] ?? "")?.position ?? null);
+    queueMove(key, item, after, position);
     if (position) upsert({ ...item, position });
-    try {
-      upsert(await api<Item>(`/items/${item.id}/move`, { method: "POST", body: { after }, token: key }));
-    } catch {
-      load();
-      toast("Não deu para mover o item.");
-    }
   }
 
   function step(item: Item, by: -1 | 1) {
@@ -238,49 +250,52 @@ export function ListView() {
     const next = [...openIds];
     next.splice(at, 1);
     next.splice(to, 0, item.id);
-    void move(item, next);
+    move(item, next);
   }
 
-  async function del(item: Item) {
+  function rename(title: string) {
+    if (!detail) return;
+    queueRename(key, detail.list.id, title);
+    setDetail((d) => d && { ...d, list: { ...d.list, title } });
+  }
+
+  function del(item: Item) {
+    queueDelete(key, [item]);
     remove(item.id);
-    try {
-      await api(`/items/${item.id}`, { method: "DELETE", token: key });
-      toast({ message: "Item removido", action: { label: "Desfazer", onClick: () => restore([item]) } });
-    } catch {
-      upsert(item);
-      toast("Não deu para remover o item.");
-    }
+    toast({ message: "Item removido", action: { label: "Desfazer", onClick: () => restore([item]) } });
   }
 
-  /** Undo: the server keeps deleted items for a few minutes and puts them back as they were. */
-  async function restore(gone: Item[]) {
+  /** Undo: cancels a delete still in the queue, or asks the server's trash (kept a few minutes). */
+  function restore(gone: Item[]) {
+    queueRestore(key, gone);
     gone.forEach(upsert);
-    try {
-      const back = await api<Item[]>("/list/items/restore", {
-        method: "POST",
-        body: { ids: gone.map((i) => i.id) },
-        token: key,
-      });
-      back.forEach(upsert);
-    } catch {
-      gone.forEach((i) => remove(i.id));
-      toast(gone.length === 1 ? "Não deu para restaurar o item." : "Não deu para restaurar os itens.");
-    }
   }
 
   async function clearDone() {
     const before = all;
     const cleared = all.filter((i) => i.done);
     patchItems((items) => items.filter((i) => !i.done));
+    const undo = {
+      message: cleared.length === 1 ? "1 item removido" : `${cleared.length} itens removidos`,
+      action: { label: "Desfazer", onClick: () => restore(cleared) },
+    };
+    // One request when the server already knows every tick; otherwise (offline, or ticks still
+    // queued) delete exactly the items shown as done, through the queue.
+    const listId = detail?.list.id;
+    if (!navigator.onLine || ops.some((o) => o.listId === listId)) {
+      queueDelete(key, cleared);
+      return toast(undo);
+    }
     try {
       await api("/list/clear-done", { method: "POST", token: key });
-      toast({
-        message: cleared.length === 1 ? "1 item removido" : `${cleared.length} itens removidos`,
-        action: { label: "Desfazer", onClick: () => restore(cleared) },
-      });
-    } catch {
-      patchItems(() => before);
-      toast("Não deu para limpar os concluídos.");
+      toast(undo);
+    } catch (e) {
+      if (e instanceof ApiError) {
+        patchItems(() => before);
+        return toast("Não deu para limpar os concluídos.");
+      }
+      queueDelete(key, cleared);
+      toast(undo);
     }
   }
 
@@ -289,12 +304,12 @@ export function ListView() {
 
   return (
     <>
-      <TopBar offline={connection === "offline"} title={detail?.list.title} listId={detail?.list.id} />
+      <TopBar offline={connection === "offline"} title={detail?.list.title} listId={detail?.list.id} token={key} />
 
       <main className="mx-auto max-w-lg px-4 pb-[calc(6.5rem+env(safe-area-inset-bottom))]">
         {detail ? (
           <>
-            <Title key={detail.list.title} token={key} title={detail.list.title} />
+            <Title key={detail.list.title} title={detail.list.title} onRename={rename} />
             <div className="mt-2 flex items-center gap-2.5 text-[15px] text-text-2">
               <ProgressRing done={doneCount} total={total} size={20} stroke={2.25} />
               <span className="tabular-nums">
@@ -319,6 +334,7 @@ export function ListView() {
                       key={item.id}
                       item={item}
                       reorderable={!sunk(item)}
+                      pending={pending.has(item.id)}
                       onToggle={toggle}
                       onDelete={del}
                       onQuantity={setQuantity}
@@ -375,7 +391,7 @@ export function ListView() {
   );
 }
 
-function TopBar({ offline, title, listId }: { offline?: boolean; title?: string; listId?: string }) {
+function TopBar({ offline, title, listId, token }: { offline?: boolean; title?: string; listId?: string; token?: string }) {
   const pinned = usePinned();
   const isPinned = !!listId && pinned.includes(listId);
   async function share() {
@@ -396,21 +412,10 @@ function TopBar({ offline, title, listId }: { offline?: boolean; title?: string;
           <ChevronLeft />
           Listas
         </Link>
-        <AnimatePresence>
-          {offline && (
-            <motion.span
-              role="status"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="rounded-full bg-surface px-2.5 py-1 text-[13px] font-medium text-text-2"
-            >
-              Reconectando…
-            </motion.span>
-          )}
-        </AnimatePresence>
+        <SyncStatus offline={offline} />
         {title && listId && (
           <div className="ml-auto flex gap-1">
+            {token && <FollowButton listId={listId} token={token} />}
             {/* 44px targets with a gap, so a thumb aimed at one doesn't land on the other. */}
             <button
               onClick={() => {
@@ -433,21 +438,16 @@ function TopBar({ offline, title, listId }: { offline?: boolean; title?: string;
   );
 }
 
-function Title({ token, title }: { token: string; title: string }) {
+function Title({ title, onRename }: { title: string; onRename: (title: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title);
   const cls = "text-[2.125rem] leading-[1.1] font-bold tracking-[-0.02em]";
 
-  async function save() {
+  function save() {
     setEditing(false);
     const clean = value.trim();
     if (!clean || clean === title) return setValue(title);
-    try {
-      await api("/list", { method: "PATCH", body: { title: clean }, token });
-    } catch {
-      setValue(title);
-      toast("Não deu para renomear a lista.");
-    }
+    onRename(clean);
   }
 
   if (editing) {

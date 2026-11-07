@@ -4,6 +4,7 @@ import { MotionConfig } from "motion/react";
 import { useEffect } from "react";
 import { initAuth } from "@/lib/api";
 import { useAuth } from "@/lib/hooks";
+import { startOutbox } from "@/lib/offline";
 import { Toast } from "./Toast";
 import { UsernameSheet } from "./UsernameSheet";
 
@@ -12,6 +13,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     initAuth();
+    startOutbox();
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js");
     }

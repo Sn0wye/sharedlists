@@ -22,6 +22,7 @@ tower_governor = { version = "0.8.0", default-features = false, features = ["axu
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
+web-push-native = "0.5"
 
 [profile.release]
 lto = "thin"
